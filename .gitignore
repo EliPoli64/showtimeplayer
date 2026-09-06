@@ -1,0 +1,52 @@
+# --- Gradle ---
+.gradle/
+**/build/
+gradle-app.setting
+
+# --- Android Studio / IntelliJ ---
+*.iml
+*.iws
+*.ipr
+.idea/
+
+# --- VS Code ---
+.vscode/
+
+# --- Local SDK / signing (machine-specific, secrets) ---
+local.properties
+*.jks
+*.keystore
+google-services.json
+
+# --- Build outputs ---
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# --- Kotlin / Java ---
+.kotlin/
+*.kotlin_module
+
+# --- NDK / CMake ---
+obj/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Logs / misc ---
+*.log
+*.orig
+*.rej
