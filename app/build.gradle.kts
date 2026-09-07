@@ -79,6 +79,10 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
+    implementation(libs.navigation.compose)
+    implementation(libs.material.icons.extended)
+    implementation(libs.datastore.preferences)
+    implementation(libs.documentfile)
 }
 
 // TODO: add Oboe + SoundTouch via prefab / manual CMake once DSP work starts
