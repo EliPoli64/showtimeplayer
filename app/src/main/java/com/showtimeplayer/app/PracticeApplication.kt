@@ -2,6 +2,7 @@ package com.showtimeplayer.app
 
 import android.app.Application
 import com.showtimeplayer.data.db.PracticeDatabase
+import com.showtimeplayer.data.repository.PresetRepositoryImpl
 import com.showtimeplayer.data.repository.TrackRepositoryImpl
 import com.showtimeplayer.data.scanner.FolderPreferences
 import com.showtimeplayer.data.scanner.MediaStoreScanner
@@ -16,6 +17,12 @@ class PracticeApplication : Application() {
             trackDao = database.trackDao(),
             scanner = MediaStoreScanner(this),
             folderPreferences = folderPreferences,
+        )
+    }
+
+    val presetRepository: PresetRepositoryImpl by lazy {
+        PresetRepositoryImpl(
+            presetDao = database.presetDao(),
         )
     }
 }

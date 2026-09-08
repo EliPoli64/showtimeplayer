@@ -8,6 +8,7 @@ import com.showtimeplayer.ui.navigation.ShowtimeNavigation
 import com.showtimeplayer.ui.screens.albums.AlbumsViewModel
 import com.showtimeplayer.ui.screens.library.LibraryViewModel
 import com.showtimeplayer.ui.screens.player.PlayerViewModel
+import com.showtimeplayer.ui.screens.presets.PresetsViewModel
 import com.showtimeplayer.ui.screens.settings.SettingsViewModel
 import com.showtimeplayer.ui.theme.ShowtimePlayerTheme
 
@@ -29,6 +30,11 @@ class MainActivity : ComponentActivity() {
         AlbumsViewModel.Factory((application as PracticeApplication).trackRepository)
     }
 
+    private val presetsViewModel: PresetsViewModel by viewModels {
+        val app = application as PracticeApplication
+        PresetsViewModel.Factory(app, app.presetRepository, app.trackRepository)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -38,6 +44,7 @@ class MainActivity : ComponentActivity() {
                     settingsViewModel = settingsViewModel,
                     playerViewModel = playerViewModel,
                     albumsViewModel = albumsViewModel,
+                    presetsViewModel = presetsViewModel,
                 )
             }
         }
