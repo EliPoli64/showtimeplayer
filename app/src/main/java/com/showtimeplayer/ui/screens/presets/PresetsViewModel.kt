@@ -29,6 +29,9 @@ enum class CreationStep {
     TIME_SIGNATURE,
     BEAT_MARKER,
     REVIEW,
+    EDIT,
+    EDIT_BEAT,
+    EDIT_TEMPO,
 }
 
 data class PresetWithTrack(
@@ -48,6 +51,7 @@ data class PresetsUiState(
     val beatMarkerMs: Long = 0L,
     val countInBars: Int = 2,
     val isPreviewPlaying: Boolean = false,
+    val isSongPlaying: Boolean = false,
     val visibleStartMs: Float = 0f,
     val visibleDurationMs: Float = 10_000f,
     val waveformAmplitudes: List<Float> = emptyList(),
@@ -56,7 +60,7 @@ data class PresetsUiState(
 class PresetsViewModel(
     private val application: Application,
     private val presetRepository: PresetRepositoryImpl,
-    trackRepository: TrackRepositoryImpl,
+    private val trackRepository: TrackRepositoryImpl,
 ) : AndroidViewModel(application) {
 
     private val creationStep = MutableStateFlow<CreationStep?>(null)
@@ -71,8 +75,11 @@ class PresetsViewModel(
     private val visibleStartMs = MutableStateFlow(0f)
     private val visibleDurationMs = MutableStateFlow(10_000f)
     private val _waveformAmplitudes = MutableStateFlow<List<Float>>(emptyList())
+    private val isSongPlaying = MutableStateFlow(false)
+    private val editingPreset = MutableStateFlow<PresetEntity?>(null)
 
     private var previewPlayer: ExoPlayer? = null
+    private var songPlayer: ExoPlayer? = null
     private val tapTimes = mutableListOf<Long>()
     private var tapResetJob: Job? = null
     private var waveformJob: Job? = null
@@ -91,7 +98,8 @@ class PresetsViewModel(
         combine(
             isPreviewPlaying, visibleStartMs, visibleDurationMs, _waveformAmplitudes,
         ) { playing, visStart, visDur, waveform -> PreviewState(playing, visStart, visDur, waveform) },
-    ) { (presets, tracks), creation, beat, preview ->
+        isSongPlaying,
+    ) { (presets, tracks), creation, beat, preview, songPlaying ->
         val presetsWithTracks = presets.map { preset ->
             PresetWithTrack(
                 preset = preset,
@@ -110,6 +118,7 @@ class PresetsViewModel(
             beatMarkerMs = beat.beatMarker,
             countInBars = beat.countInBars,
             isPreviewPlaying = preview.isPlaying,
+            isSongPlaying = songPlaying,
             visibleStartMs = preview.visibleStart,
             visibleDurationMs = preview.visibleDuration,
             waveformAmplitudes = preview.waveform,
@@ -121,6 +130,7 @@ class PresetsViewModel(
     private data class PreviewState(val isPlaying: Boolean, val visibleStart: Float, val visibleDuration: Float, val waveform: List<Float>)
 
     fun startCreation() {
+        editingPreset.value = null
         creationStep.value = CreationStep.TRACK_SELECTION
         selectedTrack.value = null
         presetName.value = ""
@@ -133,8 +143,27 @@ class PresetsViewModel(
         stopPreview()
     }
 
+    fun startEditing(preset: PresetEntity) {
+        editingPreset.value = preset
+        presetName.value = preset.name
+        bpm.value = preset.metronomeBpm
+        timeSignatureNum.value = preset.metronomeTimeSignatureNum
+        timeSignatureDenom.value = preset.metronomeTimeSignatureDenom
+        beatMarkerMs.value = preset.loopStartMs ?: 0L
+        countInBars.value = preset.metronomeCountInBars
+        visibleStartMs.value = 0f
+        releasePreviewPlayer()
+        viewModelScope.launch {
+            val track = trackRepository.getTrack(preset.trackId)
+            selectedTrack.value = track
+            creationStep.value = CreationStep.EDIT
+        }
+    }
+
     fun cancelCreation() {
-        stopPreview()
+        releasePreviewPlayer()
+        stopSongPlayback()
+        editingPreset.value = null
         creationStep.value = null
     }
 
@@ -149,7 +178,10 @@ class PresetsViewModel(
                     }
                 }
             }
-            CreationStep.TEMPO -> creationStep.value = CreationStep.TIME_SIGNATURE
+            CreationStep.TEMPO -> {
+                stopSongPlayback()
+                creationStep.value = CreationStep.TIME_SIGNATURE
+            }
             CreationStep.TIME_SIGNATURE -> {
                 creationStep.value = CreationStep.BEAT_MARKER
                 visibleStartMs.value = 0f
@@ -157,24 +189,35 @@ class PresetsViewModel(
                 visibleDurationMs.value = dur.coerceAtMost(10_000f)
                 beatMarkerMs.value = 0L
                 loadWaveform()
+                initPreviewPlayer()
             }
             CreationStep.BEAT_MARKER -> {
-                stopPreview()
+                releasePreviewPlayer()
                 creationStep.value = CreationStep.REVIEW
             }
             CreationStep.REVIEW -> savePreset()
+            CreationStep.EDIT -> saveEdit()
+            CreationStep.EDIT_BEAT -> backToEdit()
+            CreationStep.EDIT_TEMPO -> backToEdit()
         }
     }
 
     fun previousStep() {
         stopPreview()
+        stopSongPlayback()
         val current = creationStep.value ?: return
         when (current) {
             CreationStep.TRACK_SELECTION -> cancelCreation()
             CreationStep.TEMPO -> creationStep.value = CreationStep.TRACK_SELECTION
             CreationStep.TIME_SIGNATURE -> creationStep.value = CreationStep.TEMPO
-            CreationStep.BEAT_MARKER -> creationStep.value = CreationStep.TIME_SIGNATURE
+            CreationStep.BEAT_MARKER -> {
+                releasePreviewPlayer()
+                creationStep.value = CreationStep.TIME_SIGNATURE
+            }
             CreationStep.REVIEW -> creationStep.value = CreationStep.BEAT_MARKER
+            CreationStep.EDIT -> cancelCreation()
+            CreationStep.EDIT_BEAT -> backToEdit()
+            CreationStep.EDIT_TEMPO -> backToEdit()
         }
     }
 
@@ -212,35 +255,73 @@ class PresetsViewModel(
     fun updateCountInBars(bars: Int) { countInBars.value = bars.coerceIn(0, 8) }
 
     fun playPreview(positionMs: Long) {
-        val track = selectedTrack.value ?: return
+        val player = previewPlayer ?: return
+        player.seekTo(positionMs)
+        player.play()
+        isPreviewPlaying.value = true
+    }
+
+    fun stopPreview() {
+        previewPlayer?.let { try { it.pause(); it.seekTo(0) } catch (_: Exception) {} }
+        isPreviewPlaying.value = false
+    }
+
+    private fun initPreviewPlayer() {
         stopPreview()
+        val track = selectedTrack.value ?: return
         val player = ExoPlayer.Builder(application).build()
         previewPlayer = player
         player.setMediaItem(MediaItem.Builder().setUri(Uri.parse(track.uri)).build())
         player.prepare()
-        player.seekTo(positionMs)
-        player.play()
-        isPreviewPlaying.value = true
         player.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED || state == Player.STATE_IDLE) stopPreview()
+                if (state == Player.STATE_ENDED || state == Player.STATE_IDLE) {
+                    isPreviewPlaying.value = false
+                }
             }
         })
-        viewModelScope.launch { delay(4_000); stopPreview() }
     }
 
-    fun stopPreview() {
+    private fun releasePreviewPlayer() {
         previewPlayer?.let { try { it.stop(); it.release() } catch (_: Exception) {} }
         previewPlayer = null
         isPreviewPlaying.value = false
     }
 
+    fun toggleSongPlayback() {
+        if (isSongPlaying.value) {
+            stopSongPlayback()
+        } else {
+            startSongPlayback()
+        }
+    }
+
+    private fun startSongPlayback() {
+        val track = selectedTrack.value ?: return
+        stopSongPlayback()
+        val player = ExoPlayer.Builder(application).build()
+        songPlayer = player
+        player.setMediaItem(MediaItem.Builder().setUri(Uri.parse(track.uri)).build())
+        player.repeatMode = Player.REPEAT_MODE_ALL
+        player.prepare()
+        player.play()
+        isSongPlaying.value = true
+    }
+
+    fun stopSongPlayback() {
+        songPlayer?.let { try { it.stop(); it.release() } catch (_: Exception) {} }
+        songPlayer = null
+        isSongPlaying.value = false
+    }
+
     private fun savePreset() {
         val track = selectedTrack.value ?: return
         val name = presetName.value.ifBlank { track.title ?: "Preset" }
+        val editing = editingPreset.value
         viewModelScope.launch {
             presetRepository.insert(
                 PresetEntity(
+                    id = editing?.id ?: 0L,
                     trackId = track.id, name = name,
                     metronomeBpm = bpm.value,
                     metronomeTimeSignatureNum = timeSignatureNum.value,
@@ -250,12 +331,34 @@ class PresetsViewModel(
                     loopStartMs = if (beatMarkerMs.value > 0) beatMarkerMs.value else null,
                 ),
             )
+            editingPreset.value = null
             creationStep.value = null
         }
     }
 
     fun deletePreset(preset: PresetEntity) {
         viewModelScope.launch { presetRepository.delete(preset) }
+    }
+
+    fun navigateToEditBeat() {
+        creationStep.value = CreationStep.EDIT_BEAT
+        visibleStartMs.value = 0f
+        loadWaveform()
+        initPreviewPlayer()
+    }
+
+    fun navigateToEditTempo() {
+        creationStep.value = CreationStep.EDIT_TEMPO
+    }
+
+    fun saveEdit() {
+        savePreset()
+    }
+
+    fun backToEdit() {
+        releasePreviewPlayer()
+        stopSongPlayback()
+        creationStep.value = CreationStep.EDIT
     }
 
     private fun loadWaveform() {
@@ -270,7 +373,7 @@ class PresetsViewModel(
         }
     }
 
-    override fun onCleared() { stopPreview(); super.onCleared() }
+    override fun onCleared() { releasePreviewPlayer(); stopSongPlayback(); super.onCleared() }
 
     class Factory(
         private val application: Application,

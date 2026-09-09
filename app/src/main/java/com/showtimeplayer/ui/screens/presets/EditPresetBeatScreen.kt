@@ -24,7 +24,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.showtimeplayer.data.db.entity.TrackEntity
 import com.showtimeplayer.ui.components.BeatWheel
@@ -32,9 +31,8 @@ import com.showtimeplayer.util.formatDurationMs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddPresetBeatScreen(
+fun EditPresetBeatScreen(
     selectedTrack: TrackEntity?,
-    bpm: Int,
     centerMs: Long,
     onCenterMsChanged: (Long) -> Unit,
     totalDurationMs: Long,
@@ -50,7 +48,7 @@ fun AddPresetBeatScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Beat 1 Position") },
+                title = { Text("Edit Beat 1 Position") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
@@ -72,15 +70,7 @@ fun AddPresetBeatScreen(
             Text(
                 text = selectedTrack?.title ?: "",
                 style = MaterialTheme.typography.titleMedium,
-                textAlign = TextAlign.Center,
             )
-            if (bpm > 0) {
-                Text(
-                    text = "$bpm BPM",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -88,7 +78,6 @@ fun AddPresetBeatScreen(
                 text = "Drag to place beat 1 under the red line.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -106,9 +95,7 @@ fun AddPresetBeatScreen(
                 )
 
                 if (isLoading) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
@@ -122,9 +109,7 @@ fun AddPresetBeatScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = "Beat 1: ${centerMs.formatDurationMs()}",
                     style = MaterialTheme.typography.bodyMedium,
@@ -149,7 +134,7 @@ fun AddPresetBeatScreen(
                 onClick = onNext,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Next")
+                Text("Done")
             }
         }
     }

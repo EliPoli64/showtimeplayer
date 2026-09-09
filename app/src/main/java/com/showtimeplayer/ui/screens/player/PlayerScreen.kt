@@ -166,10 +166,17 @@ fun PlayerScreen(viewModel: PlayerViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
+                val positionText = if (uiState.isCountInActive && uiState.positionMs < uiState.beat1Ms) {
+                    val remaining = uiState.beat1Ms - uiState.positionMs
+                    "-%d:%02d".format(remaining / 60000, (remaining / 1000) % 60)
+                } else {
+                    uiState.positionMs.formatDurationMs()
+                }
                 Text(
-                    text = uiState.positionMs.formatDurationMs(),
+                    text = positionText,
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (uiState.isCountInActive) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
                     text = uiState.durationMs.formatDurationMs(),

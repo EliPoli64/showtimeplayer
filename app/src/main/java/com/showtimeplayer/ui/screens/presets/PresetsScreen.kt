@@ -19,7 +19,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -28,9 +30,13 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -63,6 +69,7 @@ fun PresetsScreen(
                 uiState = uiState,
                 onStartCreation = viewModel::startCreation,
                 onPresetPlay = onPresetPlay,
+                onEditPreset = viewModel::startEditing,
                 onDeletePreset = viewModel::deletePreset,
             )
             CreationStep.TRACK_SELECTION -> AddPresetTrackScreen(
@@ -75,8 +82,10 @@ fun PresetsScreen(
             CreationStep.TEMPO -> AddPresetTempoScreen(
                 selectedTrack = uiState.selectedTrack,
                 bpm = uiState.bpm,
+                isSongPlaying = uiState.isSongPlaying,
                 onBpmChanged = viewModel::updateBpm,
                 onTapTempo = viewModel::onTapTempo,
+                onToggleSong = viewModel::toggleSongPlayback,
                 onBack = viewModel::previousStep,
                 onNext = viewModel::nextStep,
             )
@@ -91,7 +100,6 @@ fun PresetsScreen(
             CreationStep.BEAT_MARKER -> AddPresetBeatScreen(
                 selectedTrack = uiState.selectedTrack,
                 bpm = uiState.bpm,
-                timeSignatureNum = uiState.timeSignatureNum,
                 centerMs = uiState.beatMarkerMs,
                 onCenterMsChanged = viewModel::updateCenterMs,
                 totalDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
@@ -115,6 +123,44 @@ fun PresetsScreen(
                 onBack = viewModel::previousStep,
                 onSave = viewModel::nextStep,
             )
+            CreationStep.EDIT -> EditPresetScreen(
+                selectedTrack = uiState.selectedTrack,
+                presetName = uiState.presetName,
+                onPresetNameChanged = viewModel::updatePresetName,
+                bpm = uiState.bpm,
+                timeSigNum = uiState.timeSignatureNum,
+                timeSigDenom = uiState.timeSignatureDenom,
+                beatMarkerMs = uiState.beatMarkerMs,
+                countInBars = uiState.countInBars,
+                onEditBeat = viewModel::navigateToEditBeat,
+                onEditTempo = viewModel::navigateToEditTempo,
+                onBack = viewModel::previousStep,
+                onSave = viewModel::saveEdit,
+            )
+            CreationStep.EDIT_BEAT -> EditPresetBeatScreen(
+                selectedTrack = uiState.selectedTrack,
+                centerMs = uiState.beatMarkerMs,
+                onCenterMsChanged = viewModel::updateCenterMs,
+                totalDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
+                waveformAmplitudes = uiState.waveformAmplitudes,
+                isPlaying = uiState.isPreviewPlaying,
+                onPlayPreview = viewModel::playPreview,
+                onStopPreview = viewModel::stopPreview,
+                onBack = viewModel::backToEdit,
+                onNext = viewModel::backToEdit,
+            )
+            CreationStep.EDIT_TEMPO -> EditPresetTempoScreen(
+                selectedTrack = uiState.selectedTrack,
+                bpm = uiState.bpm,
+                timeSigNum = uiState.timeSignatureNum,
+                timeSigDenom = uiState.timeSignatureDenom,
+                countInBars = uiState.countInBars,
+                onBpmChanged = viewModel::updateBpm,
+                onTimeSigChanged = viewModel::updateTimeSignature,
+                onCountInBarsChanged = viewModel::updateCountInBars,
+                onBack = viewModel::backToEdit,
+                onNext = viewModel::backToEdit,
+            )
         }
     }
 }
@@ -125,8 +171,11 @@ private fun PresetsListContent(
     uiState: PresetsUiState,
     onStartCreation: () -> Unit,
     onPresetPlay: (PresetEntity, com.showtimeplayer.data.db.entity.TrackEntity) -> Unit,
+    onEditPreset: (PresetEntity) -> Unit,
     onDeletePreset: (PresetEntity) -> Unit,
 ) {
+    var presetToDelete by remember { mutableStateOf<PresetEntity?>(null) }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("Presets") }) },
         floatingActionButton = {
@@ -186,11 +235,19 @@ private fun PresetsListContent(
                             )
                         },
                         trailingContent = {
-                            IconButton(onClick = { onDeletePreset(preset) }) {
-                                Icon(
-                                    imageVector = Icons.Filled.Delete,
-                                    contentDescription = "Delete preset",
-                                )
+                            Row {
+                                IconButton(onClick = { onEditPreset(preset) }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Edit,
+                                        contentDescription = "Edit preset",
+                                    )
+                                }
+                                IconButton(onClick = { presetToDelete = preset }) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Delete,
+                                        contentDescription = "Delete preset",
+                                    )
+                                }
                             }
                         },
                         modifier = Modifier.clickable(enabled = track != null) {
@@ -200,5 +257,26 @@ private fun PresetsListContent(
                 }
             }
         }
+    }
+
+    presetToDelete?.let { preset ->
+        AlertDialog(
+            onDismissRequest = { presetToDelete = null },
+            title = { Text("Delete preset") },
+            text = { Text("Delete \"${preset.name}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeletePreset(preset)
+                    presetToDelete = null
+                }) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { presetToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
