@@ -182,11 +182,7 @@ fun ShowtimeNavigation(
                 PresetsScreen(
                     viewModel = presetsViewModel,
                     onPresetPlay = { preset, track ->
-                        if (preset.metronomeEnabled && preset.metronomeCountInBars > 0 && preset.loopStartMs != null) {
-                            playerViewModel.playWithCountIn(track, preset)
-                        } else {
-                            playerViewModel.playTrack(track)
-                        }
+                        playerViewModel.playTrack(track)
                         navigateToPlayer()
                     },
                 )

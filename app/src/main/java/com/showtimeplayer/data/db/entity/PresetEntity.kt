@@ -27,10 +27,5 @@ data class PresetEntity(
     val pitchOffsetSemitones: Int = 0,
     val loopStartMs: Long? = null,
     val loopEndMs: Long? = null,
-    val metronomeEnabled: Boolean = false,
-    val metronomeBpm: Int = 120,
-    val metronomeTimeSignatureNum: Int = 4,
-    val metronomeTimeSignatureDenom: Int = 4,
-    val metronomeCountInBars: Int = 0,
     val updatedAt: Long = System.currentTimeMillis(),
 )

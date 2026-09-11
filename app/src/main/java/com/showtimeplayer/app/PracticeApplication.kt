@@ -23,6 +23,8 @@ class PracticeApplication : Application() {
     val presetRepository: PresetRepositoryImpl by lazy {
         PresetRepositoryImpl(
             presetDao = database.presetDao(),
+            metronomeLayerDao = database.metronomeLayerDao(),
+            metronomeRegionDao = database.metronomeRegionDao(),
         )
     }
 }

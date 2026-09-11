@@ -146,11 +146,11 @@ class PresetsViewModel(
     fun startEditing(preset: PresetEntity) {
         editingPreset.value = preset
         presetName.value = preset.name
-        bpm.value = preset.metronomeBpm
-        timeSignatureNum.value = preset.metronomeTimeSignatureNum
-        timeSignatureDenom.value = preset.metronomeTimeSignatureDenom
+        bpm.value = 0
+        timeSignatureNum.value = 4
+        timeSignatureDenom.value = 4
         beatMarkerMs.value = preset.loopStartMs ?: 0L
-        countInBars.value = preset.metronomeCountInBars
+        countInBars.value = 0
         visibleStartMs.value = 0f
         releasePreviewPlayer()
         viewModelScope.launch {
@@ -323,11 +323,6 @@ class PresetsViewModel(
                 PresetEntity(
                     id = editing?.id ?: 0L,
                     trackId = track.id, name = name,
-                    metronomeBpm = bpm.value,
-                    metronomeTimeSignatureNum = timeSignatureNum.value,
-                    metronomeTimeSignatureDenom = timeSignatureDenom.value,
-                    metronomeCountInBars = countInBars.value,
-                    metronomeEnabled = countInBars.value > 0,
                     loopStartMs = if (beatMarkerMs.value > 0) beatMarkerMs.value else null,
                 ),
             )

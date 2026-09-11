@@ -219,13 +219,7 @@ private fun PresetsListContent(
                         headlineContent = { Text(preset.name) },
                         supportingContent = {
                             val trackName = track?.title ?: "Unknown track"
-                            val tempoText = if (preset.metronomeBpm > 0) " • ${preset.metronomeBpm} BPM" else ""
-                            val countInText = if (preset.metronomeCountInBars > 0) {
-                                " • Count-in: ${preset.metronomeCountInBars}"
-                            } else {
-                                ""
-                            }
-                            Text("$trackName$tempoText$countInText")
+                            Text(trackName)
                         },
                         leadingContent = {
                             Icon(
