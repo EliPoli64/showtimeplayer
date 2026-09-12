@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MusicNote
@@ -28,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,126 +44,185 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.PresetEntity
+import com.showtimeplayer.data.db.entity.TrackEntity
+import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PresetsScreen(
     viewModel: PresetsViewModel,
-    onPresetPlay: (PresetEntity, com.showtimeplayer.data.db.entity.TrackEntity) -> Unit,
+    onPresetPlay: (PresetEntity, TrackEntity) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     AnimatedContent(
-        targetState = uiState.creationStep,
+        targetState = uiState.isEditing,
         transitionSpec = {
-            if (targetState != null && initialState == null) {
+            if (targetState) {
                 slideInHorizontally { it } togetherWith slideOutHorizontally { -it }
-            } else if (targetState == null && initialState != null) {
-                slideInHorizontally { -it } togetherWith slideOutHorizontally { it }
             } else {
-                slideInHorizontally { it } togetherWith slideOutHorizontally { -it }
+                slideInHorizontally { -it } togetherWith slideOutHorizontally { it }
             }
         },
-        label = "preset_creation",
-    ) { step ->
-        when (step) {
-            null -> PresetsListContent(
+        label = "preset_mode",
+    ) { editing ->
+        if (editing) {
+            DawEditor(
+                uiState = uiState,
+                viewModel = viewModel,
+            )
+        } else {
+            PresetsListContent(
                 uiState = uiState,
                 onStartCreation = viewModel::startCreation,
                 onPresetPlay = onPresetPlay,
                 onEditPreset = viewModel::startEditing,
                 onDeletePreset = viewModel::deletePreset,
             )
-            CreationStep.TRACK_SELECTION -> AddPresetTrackScreen(
-                tracks = uiState.allTracks,
-                selectedTrack = uiState.selectedTrack,
-                onTrackSelected = viewModel::selectTrack,
-                onBack = viewModel::previousStep,
-                onNext = viewModel::nextStep,
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DawEditor(
+    uiState: PresetsUiState,
+    viewModel: PresetsViewModel,
+) {
+    var regionToEdit by remember { mutableStateOf<MetronomeRegion?>(null) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Edit Metronome") },
+                navigationIcon = {
+                    IconButton(onClick = viewModel::cancelEditing) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Close editor",
+                        )
+                    }
+                },
             )
-            CreationStep.TEMPO -> AddPresetTempoScreen(
-                selectedTrack = uiState.selectedTrack,
-                bpm = uiState.bpm,
-                isSongPlaying = uiState.isSongPlaying,
-                onBpmChanged = viewModel::updateBpm,
-                onTapTempo = viewModel::onTapTempo,
-                onToggleSong = viewModel::toggleSongPlayback,
-                onBack = viewModel::previousStep,
-                onNext = viewModel::nextStep,
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp),
+        ) {
+            // Preset name
+            OutlinedTextField(
+                value = uiState.presetName,
+                onValueChange = viewModel::updatePresetName,
+                label = { Text("Preset name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
             )
-            CreationStep.TIME_SIGNATURE -> AddPresetTimeSignatureScreen(
-                selectedTrack = uiState.selectedTrack,
-                currentTimeSigNum = uiState.timeSignatureNum,
-                currentTimeSigDenom = uiState.timeSignatureDenom,
-                onTimeSignatureChanged = viewModel::updateTimeSignature,
-                onBack = viewModel::previousStep,
-                onNext = viewModel::nextStep,
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Track name
+            Text(
+                text = uiState.selectedTrack?.title ?: "",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            CreationStep.BEAT_MARKER -> AddPresetBeatScreen(
-                selectedTrack = uiState.selectedTrack,
-                bpm = uiState.bpm,
-                centerMs = uiState.beatMarkerMs,
-                onCenterMsChanged = viewModel::updateCenterMs,
-                totalDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
-                waveformAmplitudes = uiState.waveformAmplitudes,
-                isPlaying = uiState.isPreviewPlaying,
-                onPlayPreview = viewModel::playPreview,
-                onStopPreview = viewModel::stopPreview,
-                onBack = viewModel::previousStep,
-                onNext = viewModel::nextStep,
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Layer stack
+            MetronomeLayerStack(
+                layers = uiState.layers,
+                selectedRegion = uiState.selectedRegion,
+                trackDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
+                onRegionTap = { region ->
+                    regionToEdit = region
+                    viewModel.selectRegion(region)
+                },
+                onAddRegion = viewModel::addRegion,
+                onAddLayer = viewModel::addLayer,
+                onRemoveLayer = viewModel::removeLayer,
+                onToggleLayer = viewModel::toggleLayerEnabled,
+                canAddLayer = uiState.canAddLayer,
             )
-            CreationStep.REVIEW -> AddPresetReviewScreen(
-                selectedTrack = uiState.selectedTrack,
-                presetName = uiState.presetName,
-                onPresetNameChanged = viewModel::updatePresetName,
-                bpm = uiState.bpm,
-                timeSigNum = uiState.timeSignatureNum,
-                timeSigDenom = uiState.timeSignatureDenom,
-                beatMarkerMs = uiState.beatMarkerMs,
-                countInBars = uiState.countInBars,
-                onCountInBarsChanged = viewModel::updateCountInBars,
-                onBack = viewModel::previousStep,
-                onSave = viewModel::nextStep,
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Save button
+            TextButton(
+                onClick = viewModel::savePreset,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save")
+            }
+        }
+    }
+
+    regionToEdit?.let { region ->
+        RegionEditSheet(
+            region = region,
+            onDismiss = {
+                regionToEdit = null
+                viewModel.clearSelectedRegion()
+            },
+            onBpmChanged = { newBpm -> viewModel.updateRegion(region.copy(bpm = newBpm)) },
+            onTimeSigChanged = { num, denom ->
+                viewModel.updateRegion(region.copy(timeSignatureNum = num, timeSignatureDenom = denom))
+            },
+            onCountInBarsChanged = { bars -> viewModel.updateRegion(region.copy(countInBars = bars)) },
+            onTapTempo = { viewModel.onTapTempo(region) },
+            onDelete = {
+                viewModel.removeRegion(region.id)
+                regionToEdit = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun MetronomeLayerStack(
+    layers: List<MetronomeLayerWithRegions>,
+    selectedRegion: MetronomeRegion?,
+    trackDurationMs: Long,
+    onRegionTap: (MetronomeRegion) -> Unit,
+    onAddRegion: (Long) -> Unit,
+    onAddLayer: () -> Unit,
+    onRemoveLayer: (Long) -> Unit,
+    onToggleLayer: (Long) -> Unit,
+    canAddLayer: Boolean,
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        layers.forEachIndexed { index, layerWithRegions ->
+            MetronomeTrackRow(
+                layerWithRegions = layerWithRegions,
+                colorIndex = index,
+                selectedRegionId = selectedRegion?.id,
+                trackDurationMs = trackDurationMs,
+                onRegionTap = onRegionTap,
+                onAddRegion = { onAddRegion(layerWithRegions.layer.id) },
+                onRemove = { onRemoveLayer(layerWithRegions.layer.id) },
+                onToggleEnabled = { onToggleLayer(layerWithRegions.layer.id) },
             )
-            CreationStep.EDIT -> EditPresetScreen(
-                selectedTrack = uiState.selectedTrack,
-                presetName = uiState.presetName,
-                onPresetNameChanged = viewModel::updatePresetName,
-                bpm = uiState.bpm,
-                timeSigNum = uiState.timeSignatureNum,
-                timeSigDenom = uiState.timeSignatureDenom,
-                beatMarkerMs = uiState.beatMarkerMs,
-                countInBars = uiState.countInBars,
-                onEditBeat = viewModel::navigateToEditBeat,
-                onEditTempo = viewModel::navigateToEditTempo,
-                onBack = viewModel::previousStep,
-                onSave = viewModel::saveEdit,
-            )
-            CreationStep.EDIT_BEAT -> EditPresetBeatScreen(
-                selectedTrack = uiState.selectedTrack,
-                centerMs = uiState.beatMarkerMs,
-                onCenterMsChanged = viewModel::updateCenterMs,
-                totalDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
-                waveformAmplitudes = uiState.waveformAmplitudes,
-                isPlaying = uiState.isPreviewPlaying,
-                onPlayPreview = viewModel::playPreview,
-                onStopPreview = viewModel::stopPreview,
-                onBack = viewModel::backToEdit,
-                onNext = viewModel::backToEdit,
-            )
-            CreationStep.EDIT_TEMPO -> EditPresetTempoScreen(
-                selectedTrack = uiState.selectedTrack,
-                bpm = uiState.bpm,
-                timeSigNum = uiState.timeSignatureNum,
-                timeSigDenom = uiState.timeSignatureDenom,
-                countInBars = uiState.countInBars,
-                onBpmChanged = viewModel::updateBpm,
-                onTimeSigChanged = viewModel::updateTimeSignature,
-                onCountInBarsChanged = viewModel::updateCountInBars,
-                onBack = viewModel::backToEdit,
-                onNext = viewModel::backToEdit,
-            )
+        }
+
+        if (canAddLayer) {
+            TextButton(
+                onClick = onAddLayer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(" Add Layer")
+            }
         }
     }
 }
@@ -170,7 +232,7 @@ fun PresetsScreen(
 private fun PresetsListContent(
     uiState: PresetsUiState,
     onStartCreation: () -> Unit,
-    onPresetPlay: (PresetEntity, com.showtimeplayer.data.db.entity.TrackEntity) -> Unit,
+    onPresetPlay: (PresetEntity, TrackEntity) -> Unit,
     onEditPreset: (PresetEntity) -> Unit,
     onDeletePreset: (PresetEntity) -> Unit,
 ) {

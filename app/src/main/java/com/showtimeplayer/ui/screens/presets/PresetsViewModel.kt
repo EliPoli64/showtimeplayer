@@ -8,8 +8,11 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import com.showtimeplayer.data.db.entity.MetronomeLayer
+import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.PresetEntity
 import com.showtimeplayer.data.db.entity.TrackEntity
+import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetRepositoryImpl
 import com.showtimeplayer.data.repository.TrackRepositoryImpl
 import com.showtimeplayer.util.AudioDecoder
@@ -23,16 +26,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-enum class CreationStep {
-    TRACK_SELECTION,
-    TEMPO,
-    TIME_SIGNATURE,
-    BEAT_MARKER,
-    REVIEW,
-    EDIT,
-    EDIT_BEAT,
-    EDIT_TEMPO,
-}
+val LAYER_COLORS = listOf(
+    0xFF4CAF50,
+    0xFF2196F3,
+    0xFFFF9800,
+    0xFFE91E63,
+)
 
 data class PresetWithTrack(
     val preset: PresetEntity,
@@ -42,20 +41,21 @@ data class PresetWithTrack(
 data class PresetsUiState(
     val presets: List<PresetWithTrack> = emptyList(),
     val allTracks: List<TrackEntity> = emptyList(),
-    val creationStep: CreationStep? = null,
+    val isEditing: Boolean = false,
+    val editingPreset: PresetEntity? = null,
     val selectedTrack: TrackEntity? = null,
     val presetName: String = "",
-    val bpm: Int = 0,
-    val timeSignatureNum: Int = 4,
-    val timeSignatureDenom: Int = 4,
-    val beatMarkerMs: Long = 0L,
-    val countInBars: Int = 2,
+    val layers: List<MetronomeLayerWithRegions> = emptyList(),
+    val selectedRegion: MetronomeRegion? = null,
     val isPreviewPlaying: Boolean = false,
     val isSongPlaying: Boolean = false,
     val visibleStartMs: Float = 0f,
     val visibleDurationMs: Float = 10_000f,
     val waveformAmplitudes: List<Float> = emptyList(),
-)
+) {
+    val activeLayerCount: Int get() = layers.count { it.layer.enabled }
+    val canAddLayer: Boolean get() = layers.size < 4
+}
 
 class PresetsViewModel(
     private val application: Application,
@@ -63,26 +63,24 @@ class PresetsViewModel(
     private val trackRepository: TrackRepositoryImpl,
 ) : AndroidViewModel(application) {
 
-    private val creationStep = MutableStateFlow<CreationStep?>(null)
+    private val isEditing = MutableStateFlow(false)
+    private val editingPreset = MutableStateFlow<PresetEntity?>(null)
     private val selectedTrack = MutableStateFlow<TrackEntity?>(null)
     private val presetName = MutableStateFlow("")
-    private val bpm = MutableStateFlow(0)
-    private val timeSignatureNum = MutableStateFlow(4)
-    private val timeSignatureDenom = MutableStateFlow(4)
-    private val beatMarkerMs = MutableStateFlow(0L)
-    private val countInBars = MutableStateFlow(2)
+    private val layers = MutableStateFlow<List<MetronomeLayerWithRegions>>(emptyList())
+    private val selectedRegion = MutableStateFlow<MetronomeRegion?>(null)
     private val isPreviewPlaying = MutableStateFlow(false)
     private val visibleStartMs = MutableStateFlow(0f)
     private val visibleDurationMs = MutableStateFlow(10_000f)
     private val _waveformAmplitudes = MutableStateFlow<List<Float>>(emptyList())
     private val isSongPlaying = MutableStateFlow(false)
-    private val editingPreset = MutableStateFlow<PresetEntity?>(null)
 
     private var previewPlayer: ExoPlayer? = null
     private var songPlayer: ExoPlayer? = null
     private val tapTimes = mutableListOf<Long>()
     private var tapResetJob: Job? = null
     private var waveformJob: Job? = null
+    private var layersObservingJob: Job? = null
 
     val uiState: StateFlow<PresetsUiState> = combine(
         combine(
@@ -90,16 +88,16 @@ class PresetsViewModel(
             trackRepository.observeTracks(),
         ) { presets, tracks -> presets to tracks },
         combine(
-            creationStep, selectedTrack, presetName, bpm,
-        ) { step, track, name, b -> CreationState(step, track, name, b) },
+            isEditing, editingPreset, selectedTrack, presetName,
+        ) { editing, preset, track, name -> EditState(editing, preset, track, name) },
         combine(
-            timeSignatureNum, timeSignatureDenom, beatMarkerMs, countInBars,
-        ) { num, denom, marker, bars -> BeatState(num, denom, marker, bars) },
+            layers, selectedRegion,
+        ) { l, r -> LayersState(l, r) },
         combine(
             isPreviewPlaying, visibleStartMs, visibleDurationMs, _waveformAmplitudes,
         ) { playing, visStart, visDur, waveform -> PreviewState(playing, visStart, visDur, waveform) },
         isSongPlaying,
-    ) { (presets, tracks), creation, beat, preview, songPlaying ->
+    ) { (presets, tracks), edit, layerState, preview, songPlaying ->
         val presetsWithTracks = presets.map { preset ->
             PresetWithTrack(
                 preset = preset,
@@ -109,14 +107,12 @@ class PresetsViewModel(
         PresetsUiState(
             presets = presetsWithTracks,
             allTracks = tracks,
-            creationStep = creation.step,
-            selectedTrack = creation.track,
-            presetName = creation.name,
-            bpm = creation.bpm,
-            timeSignatureNum = beat.timeSigNum,
-            timeSignatureDenom = beat.timeSigDenom,
-            beatMarkerMs = beat.beatMarker,
-            countInBars = beat.countInBars,
+            isEditing = edit.isEditing,
+            editingPreset = edit.preset,
+            selectedTrack = edit.track,
+            presetName = edit.name,
+            layers = layerState.layers,
+            selectedRegion = layerState.selectedRegion,
             isPreviewPlaying = preview.isPlaying,
             isSongPlaying = songPlaying,
             visibleStartMs = preview.visibleStart,
@@ -125,125 +121,213 @@ class PresetsViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PresetsUiState())
 
-    private data class CreationState(val step: CreationStep?, val track: TrackEntity?, val name: String, val bpm: Int)
-    private data class BeatState(val timeSigNum: Int, val timeSigDenom: Int, val beatMarker: Long, val countInBars: Int)
-    private data class PreviewState(val isPlaying: Boolean, val visibleStart: Float, val visibleDuration: Float, val waveform: List<Float>)
+    private data class EditState(
+        val isEditing: Boolean,
+        val preset: PresetEntity?,
+        val track: TrackEntity?,
+        val name: String,
+    )
+
+    private data class LayersState(
+        val layers: List<MetronomeLayerWithRegions>,
+        val selectedRegion: MetronomeRegion?,
+    )
+
+    private data class PreviewState(
+        val isPlaying: Boolean,
+        val visibleStart: Float,
+        val visibleDuration: Float,
+        val waveform: List<Float>,
+    )
 
     fun startCreation() {
+        isEditing.value = true
         editingPreset.value = null
-        creationStep.value = CreationStep.TRACK_SELECTION
         selectedTrack.value = null
         presetName.value = ""
-        bpm.value = 0
-        timeSignatureNum.value = 4
-        timeSignatureDenom.value = 4
-        beatMarkerMs.value = 0L
-        countInBars.value = 2
+        layers.value = emptyList()
+        selectedRegion.value = null
         visibleStartMs.value = 0f
         stopPreview()
+        stopSongPlayback()
+    }
+
+    fun selectTrackForCreation(track: TrackEntity) {
+        selectedTrack.value = track
+        if (presetName.value.isBlank()) {
+            presetName.value = track.title ?: "Preset"
+        }
+        viewModelScope.launch {
+            val presetId = presetRepository.insert(
+                PresetEntity(trackId = track.id, name = track.title ?: "Preset"),
+            )
+            val preset = presetRepository.getPreset(presetId)
+            editingPreset.value = preset
+            observeLayers(presetId)
+        }
     }
 
     fun startEditing(preset: PresetEntity) {
+        isEditing.value = true
         editingPreset.value = preset
         presetName.value = preset.name
-        bpm.value = 0
-        timeSignatureNum.value = 4
-        timeSignatureDenom.value = 4
-        beatMarkerMs.value = preset.loopStartMs ?: 0L
-        countInBars.value = 0
+        selectedRegion.value = null
         visibleStartMs.value = 0f
         releasePreviewPlayer()
         viewModelScope.launch {
             val track = trackRepository.getTrack(preset.trackId)
             selectedTrack.value = track
-            creationStep.value = CreationStep.EDIT
+            observeLayers(preset.id)
+            loadWaveform()
+            initPreviewPlayer()
         }
     }
 
-    fun cancelCreation() {
-        releasePreviewPlayer()
-        stopSongPlayback()
-        editingPreset.value = null
-        creationStep.value = null
-    }
-
-    fun nextStep() {
-        val current = creationStep.value ?: return
-        when (current) {
-            CreationStep.TRACK_SELECTION -> {
-                if (selectedTrack.value != null) {
-                    creationStep.value = CreationStep.TEMPO
-                    if (presetName.value.isBlank()) {
-                        presetName.value = selectedTrack.value?.title ?: "Preset"
+    private fun observeLayers(presetId: Long) {
+        layersObservingJob?.cancel()
+        layersObservingJob = viewModelScope.launch {
+            presetRepository.observePresetLayers(presetId).collect { layerList ->
+                val withRegions = layerList.map { layer ->
+                    MetronomeLayerWithRegions(
+                        layer = layer,
+                        regions = emptyList(),
+                    )
+                }
+                layers.value = withRegions
+                // Observe regions for each layer
+                for (layer in layerList) {
+                    launch {
+                        presetRepository.observeLayerRegions(layer.id).collect { regions ->
+                            layers.value = layers.value.map {
+                                if (it.layer.id == layer.id) {
+                                    it.copy(regions = regions)
+                                } else {
+                                    it
+                                }
+                            }
+                        }
                     }
                 }
             }
-            CreationStep.TEMPO -> {
-                stopSongPlayback()
-                creationStep.value = CreationStep.TIME_SIGNATURE
-            }
-            CreationStep.TIME_SIGNATURE -> {
-                creationStep.value = CreationStep.BEAT_MARKER
-                visibleStartMs.value = 0f
-                val dur = selectedTrack.value?.durationMs?.toFloat() ?: 10_000f
-                visibleDurationMs.value = dur.coerceAtMost(10_000f)
-                beatMarkerMs.value = 0L
-                loadWaveform()
-                initPreviewPlayer()
-            }
-            CreationStep.BEAT_MARKER -> {
-                releasePreviewPlayer()
-                creationStep.value = CreationStep.REVIEW
-            }
-            CreationStep.REVIEW -> savePreset()
-            CreationStep.EDIT -> saveEdit()
-            CreationStep.EDIT_BEAT -> backToEdit()
-            CreationStep.EDIT_TEMPO -> backToEdit()
         }
     }
 
-    fun previousStep() {
-        stopPreview()
+    fun cancelEditing() {
+        releasePreviewPlayer()
         stopSongPlayback()
-        val current = creationStep.value ?: return
-        when (current) {
-            CreationStep.TRACK_SELECTION -> cancelCreation()
-            CreationStep.TEMPO -> creationStep.value = CreationStep.TRACK_SELECTION
-            CreationStep.TIME_SIGNATURE -> creationStep.value = CreationStep.TEMPO
-            CreationStep.BEAT_MARKER -> {
-                releasePreviewPlayer()
-                creationStep.value = CreationStep.TIME_SIGNATURE
+        layersObservingJob?.cancel()
+        isEditing.value = false
+        editingPreset.value = null
+        selectedTrack.value = null
+        selectedRegion.value = null
+        layers.value = emptyList()
+    }
+
+    fun updatePresetName(name: String) {
+        presetName.value = name
+    }
+
+    fun savePreset() {
+        val preset = editingPreset.value ?: return
+        val name = presetName.value.ifBlank { selectedTrack.value?.title ?: "Preset" }
+        viewModelScope.launch {
+            presetRepository.insert(
+                preset.copy(name = name, updatedAt = System.currentTimeMillis()),
+            )
+            isEditing.value = false
+            editingPreset.value = null
+            selectedTrack.value = null
+            selectedRegion.value = null
+            layers.value = emptyList()
+        }
+    }
+
+    fun deletePreset(preset: PresetEntity) {
+        viewModelScope.launch { presetRepository.delete(preset) }
+    }
+
+    // -- Layer operations --
+
+    fun addLayer() {
+        val preset = editingPreset.value ?: return
+        val currentLayerCount = layers.value.size
+        if (currentLayerCount >= 4) return
+        viewModelScope.launch {
+            presetRepository.insertLayer(
+                MetronomeLayer(
+                    presetId = preset.id,
+                    name = "Layer ${currentLayerCount + 1}",
+                    sortOrder = currentLayerCount,
+                ),
+            )
+        }
+    }
+
+    fun removeLayer(layerId: Long) {
+        viewModelScope.launch { presetRepository.deleteLayerById(layerId) }
+    }
+
+    fun toggleLayerEnabled(layerId: Long) {
+        val layer = layers.value.find { it.layer.id == layerId }?.layer ?: return
+        viewModelScope.launch {
+            presetRepository.updateLayer(layer.copy(enabled = !layer.enabled))
+        }
+    }
+
+    // -- Region operations --
+
+    fun addRegion(layerId: Long) {
+        val track = selectedTrack.value ?: return
+        val existingRegions = layers.value.find { it.layer.id == layerId }?.regions ?: emptyList()
+        val startMs = if (existingRegions.isNotEmpty()) {
+            existingRegions.maxOf { it.endMs ?: it.startMs }
+        } else {
+            0L
+        }
+        viewModelScope.launch {
+            presetRepository.insertRegion(
+                MetronomeRegion(
+                    layerId = layerId,
+                    startMs = startMs,
+                    endMs = null,
+                    bpm = 120,
+                    timeSignatureNum = 4,
+                    timeSignatureDenom = 4,
+                    countInBars = 2,
+                    sortOrder = existingRegions.size,
+                ),
+            )
+        }
+    }
+
+    fun updateRegion(region: MetronomeRegion) {
+        viewModelScope.launch { presetRepository.updateRegion(region) }
+    }
+
+    fun removeRegion(regionId: Long) {
+        viewModelScope.launch {
+            presetRepository.deleteRegionById(regionId)
+            if (selectedRegion.value?.id == regionId) {
+                selectedRegion.value = null
             }
-            CreationStep.REVIEW -> creationStep.value = CreationStep.BEAT_MARKER
-            CreationStep.EDIT -> cancelCreation()
-            CreationStep.EDIT_BEAT -> backToEdit()
-            CreationStep.EDIT_TEMPO -> backToEdit()
         }
     }
 
-    fun selectTrack(track: TrackEntity) { selectedTrack.value = track }
-    fun updatePresetName(name: String) { presetName.value = name }
-    fun updateBpm(newBpm: Int) { bpm.value = newBpm.coerceIn(1, 300) }
-
-    fun onTapTempo() {
-        val now = System.currentTimeMillis()
-        tapResetJob?.cancel()
-        if (tapTimes.isNotEmpty() && (now - tapTimes.last()) > 2_000) tapTimes.clear()
-        tapTimes.add(now)
-        if (tapTimes.size >= 2) {
-            val avg = tapTimes.zipWithNext { a, b -> b - a }.average()
-            if (avg > 0) bpm.value = (60_000.0 / avg).roundToInt().coerceIn(1, 300)
-        }
-        tapResetJob = viewModelScope.launch { delay(2_000); tapTimes.clear() }
+    fun selectRegion(region: MetronomeRegion) {
+        selectedRegion.value = region
     }
 
-    fun updateTimeSignature(num: Int, denom: Int) {
-        timeSignatureNum.value = num
-        timeSignatureDenom.value = denom
+    fun clearSelectedRegion() {
+        selectedRegion.value = null
     }
+
+    // -- Preview & waveform --
 
     fun updateCenterMs(positionMs: Long) {
-        beatMarkerMs.value = positionMs.coerceAtLeast(0)
+        val preset = editingPreset.value ?: return
+        viewModelScope.launch {
+            presetRepository.insert(preset.copy(loopStartMs = positionMs.coerceAtLeast(0)))
+        }
     }
 
     fun updateVisibleRange(startMs: Float, durationMs: Float) {
@@ -251,8 +335,6 @@ class PresetsViewModel(
         visibleDurationMs.value = durationMs.coerceIn(1_000f, totalMs + 200f)
         visibleStartMs.value = startMs.coerceIn(-100f, totalMs + 100f - visibleDurationMs.value)
     }
-
-    fun updateCountInBars(bars: Int) { countInBars.value = bars.coerceIn(0, 8) }
 
     fun playPreview(positionMs: Long) {
         val player = previewPlayer ?: return
@@ -314,46 +396,19 @@ class PresetsViewModel(
         isSongPlaying.value = false
     }
 
-    private fun savePreset() {
-        val track = selectedTrack.value ?: return
-        val name = presetName.value.ifBlank { track.title ?: "Preset" }
-        val editing = editingPreset.value
-        viewModelScope.launch {
-            presetRepository.insert(
-                PresetEntity(
-                    id = editing?.id ?: 0L,
-                    trackId = track.id, name = name,
-                    loopStartMs = if (beatMarkerMs.value > 0) beatMarkerMs.value else null,
-                ),
-            )
-            editingPreset.value = null
-            creationStep.value = null
+    fun onTapTempo(region: MetronomeRegion) {
+        val now = System.currentTimeMillis()
+        tapResetJob?.cancel()
+        if (tapTimes.isNotEmpty() && (now - tapTimes.last()) > 2_000) tapTimes.clear()
+        tapTimes.add(now)
+        if (tapTimes.size >= 2) {
+            val avg = tapTimes.zipWithNext { a, b -> b - a }.average()
+            if (avg > 0) {
+                val newBpm = (60_000.0 / avg).roundToInt().coerceIn(1, 300)
+                updateRegion(region.copy(bpm = newBpm))
+            }
         }
-    }
-
-    fun deletePreset(preset: PresetEntity) {
-        viewModelScope.launch { presetRepository.delete(preset) }
-    }
-
-    fun navigateToEditBeat() {
-        creationStep.value = CreationStep.EDIT_BEAT
-        visibleStartMs.value = 0f
-        loadWaveform()
-        initPreviewPlayer()
-    }
-
-    fun navigateToEditTempo() {
-        creationStep.value = CreationStep.EDIT_TEMPO
-    }
-
-    fun saveEdit() {
-        savePreset()
-    }
-
-    fun backToEdit() {
-        releasePreviewPlayer()
-        stopSongPlayback()
-        creationStep.value = CreationStep.EDIT
+        tapResetJob = viewModelScope.launch { delay(2_000); tapTimes.clear() }
     }
 
     private fun loadWaveform() {
@@ -362,13 +417,18 @@ class PresetsViewModel(
         _waveformAmplitudes.value = emptyList()
         waveformJob = viewModelScope.launch {
             val context = application
-            val uri = android.net.Uri.parse(track.uri)
+            val uri = Uri.parse(track.uri)
             val waveform = AudioDecoder.decodeFullWaveform(context, uri)
             _waveformAmplitudes.value = waveform.amplitudes
         }
     }
 
-    override fun onCleared() { releasePreviewPlayer(); stopSongPlayback(); super.onCleared() }
+    override fun onCleared() {
+        releasePreviewPlayer()
+        stopSongPlayback()
+        layersObservingJob?.cancel()
+        super.onCleared()
+    }
 
     class Factory(
         private val application: Application,
