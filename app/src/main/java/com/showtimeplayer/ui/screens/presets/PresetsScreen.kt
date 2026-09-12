@@ -224,6 +224,7 @@ private fun DawEditor(
                         viewModel.addRegionAtPosition(layerId, positionMs)
                     },
                     onSongMove = viewModel::moveSong,
+                    onSeek = viewModel::seekTo,
                     onScrubStart = viewModel::onScrubStart,
                     onScrub = viewModel::onScrub,
                     onScrubEnd = viewModel::onScrubEnd,
@@ -288,6 +289,7 @@ private fun DawEditor(
                 viewModel.updateRegion(region.copy(timeSignatureNum = num, timeSignatureDenom = denom))
             },
             onCountInBarsChanged = { bars -> viewModel.updateRegion(region.copy(countInBars = bars)) },
+            onVolumeChanged = { vol -> viewModel.updateRegion(region.copy(volume = vol)) },
             onTapTempo = { viewModel.onTapTempo(region) },
             onDelete = { viewModel.removeRegion(region.id) },
         )

@@ -26,5 +26,6 @@ data class MetronomeRegion(
     val timeSignatureNum: Int = 4,
     val timeSignatureDenom: Int = 4,
     val countInBars: Int = 0,
+    val volume: Float = 1.0f,
     val sortOrder: Int = 0,
 )

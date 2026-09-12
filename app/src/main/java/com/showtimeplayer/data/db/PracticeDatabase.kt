@@ -20,7 +20,7 @@ import com.showtimeplayer.data.db.entity.TrackEntity
         MetronomeLayer::class,
         MetronomeRegion::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class PracticeDatabase : RoomDatabase() {

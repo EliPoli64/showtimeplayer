@@ -16,6 +16,7 @@ struct MetronomeStream {
     float bpm = 120.0f;
     int timeSigNum = 4;
     int timeSigDenom = 4;
+    float volume = 1.0f;
 
     // Oscillator state
     double phase = 0.0;
@@ -37,7 +38,7 @@ public:
 
     MetronomeSynthesizer() = default;
 
-    void addStream(int id, float bpm, int timeSigNum, int timeSigDenom) {
+    void addStream(int id, float bpm, int timeSigNum, int timeSigDenom, float volume) {
         std::lock_guard<std::mutex> lock(mtx);
         streams.erase(
             std::remove_if(streams.begin(), streams.end(),
@@ -50,6 +51,7 @@ public:
         stream.bpm = bpm;
         stream.timeSigNum = timeSigNum;
         stream.timeSigDenom = timeSigDenom;
+        stream.volume = std::max(0.0f, std::min(1.0f, volume));
         stream.beatIntervalSamples = static_cast<int64_t>(
             (60.0 / bpm) * SAMPLE_RATE
         );
@@ -68,13 +70,14 @@ public:
         );
     }
 
-    void updateStream(int id, float bpm, int timeSigNum, int timeSigDenom) {
+    void updateStream(int id, float bpm, int timeSigNum, int timeSigDenom, float volume) {
         std::lock_guard<std::mutex> lock(mtx);
         for (auto& s : streams) {
             if (s.id == id) {
                 s.bpm = bpm;
                 s.timeSigNum = timeSigNum;
                 s.timeSigDenom = timeSigDenom;
+                s.volume = std::max(0.0f, std::min(1.0f, volume));
                 s.beatIntervalSamples = static_cast<int64_t>(
                     (60.0 / bpm) * SAMPLE_RATE
                 );
@@ -151,7 +154,7 @@ private:
     void triggerClick(MetronomeStream& s) {
         bool isAccent = (s.beatCount % s.timeSigNum == 0);
         float frequency = isAccent ? 1000.0f : 800.0f;
-        s.amplitude = isAccent ? 0.8f : 0.4f;
+        s.amplitude = (isAccent ? 0.8f : 0.4f) * s.volume;
         s.phase = 0.0;
         s.phaseIncrement = (2.0 * M_PI * frequency) / SAMPLE_RATE;
 

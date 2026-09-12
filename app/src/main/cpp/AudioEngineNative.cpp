@@ -111,14 +111,16 @@ Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeAddStream(
     jint streamId,
     jfloat bpm,
     jint timeSigNum,
-    jint timeSigDenom
+    jint timeSigDenom,
+    jfloat volume
 ) {
     if (!g_engine) return;
     g_engine->synth.addStream(
         static_cast<int>(streamId),
         static_cast<float>(bpm),
         static_cast<int>(timeSigNum),
-        static_cast<int>(timeSigDenom)
+        static_cast<int>(timeSigDenom),
+        static_cast<float>(volume)
     );
 }
 
@@ -139,14 +141,16 @@ Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeUpdateStream(
     jint streamId,
     jfloat bpm,
     jint timeSigNum,
-    jint timeSigDenom
+    jint timeSigDenom,
+    jfloat volume
 ) {
     if (!g_engine) return;
     g_engine->synth.updateStream(
         static_cast<int>(streamId),
         static_cast<float>(bpm),
         static_cast<int>(timeSigNum),
-        static_cast<int>(timeSigDenom)
+        static_cast<int>(timeSigDenom),
+        static_cast<float>(volume)
     );
 }
 

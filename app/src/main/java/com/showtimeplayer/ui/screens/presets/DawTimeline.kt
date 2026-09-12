@@ -104,6 +104,7 @@ fun DawTimeline(
     onRegionMove: (regionId: Long, newStartMs: Long, newLayerId: Long?) -> Unit,
     onAddRegionAtPosition: (layerId: Long, positionMs: Long) -> Unit,
     onSongMove: (deltaMs: Long) -> Unit,
+    onSeek: (Long) -> Unit,
     onScrubStart: () -> Unit,
     onScrub: (Long) -> Unit,
     onScrubEnd: () -> Unit,
@@ -124,6 +125,7 @@ fun DawTimeline(
     val currentOnRegionMove by rememberUpdatedState(onRegionMove)
     val currentOnAddRegionAtPosition by rememberUpdatedState(onAddRegionAtPosition)
     val currentOnSongMove by rememberUpdatedState(onSongMove)
+    val currentOnSeek by rememberUpdatedState(onSeek)
     val currentOnScrubStart by rememberUpdatedState(onScrubStart)
     val currentOnScrub by rememberUpdatedState(onScrub)
     val currentOnScrubEnd by rememberUpdatedState(onScrubEnd)
@@ -140,18 +142,21 @@ fun DawTimeline(
     Box(
         modifier = modifier
             .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    if (zoom != 1f) {
-                        val oldMpp = msPerPixel
-                        msPerPixel = (msPerPixel / zoom).coerceIn(MIN_MS_PER_PIXEL, MAX_MS_PER_PIXEL)
-                        val scale = msPerPixel / oldMpp
-                        viewOffsetMs = (viewOffsetMs * scale).toLong()
-                    }
-                    if (pan.x != 0f) {
-                        val timelineEnd = (trackDurationMs + songOffsetMs).coerceAtLeast(1000L)
-                        viewOffsetMs = (viewOffsetMs - (pan.x * msPerPixel).toLong())
-                            .coerceIn(0L, (timelineEnd - 1000).coerceAtLeast(0))
-                    }
+                detectTransformGestures { centroid, pan, gestureZoom, _ ->
+                    val oldMsPerPixel = msPerPixel
+                    val newMsPerPixel = (msPerPixel / gestureZoom)
+                        .coerceIn(MIN_MS_PER_PIXEL, MAX_MS_PER_PIXEL)
+
+                    // Time currently under the focal point (accounting for the centroid's pan).
+                    val focusTimeMs =
+                        viewOffsetMs + (centroid.x - pan.x) * oldMsPerPixel
+                    // Keep that same time under the focal point after scaling.
+                    val newOffsetMs = focusTimeMs - centroid.x * newMsPerPixel
+
+                    msPerPixel = newMsPerPixel
+                    val timelineEnd = (trackDurationMs + songOffsetMs).coerceAtLeast(1000L)
+                    viewOffsetMs = newOffsetMs.toLong()
+                        .coerceIn(0L, (timelineEnd - 1000).coerceAtLeast(0))
                 }
             }
             .pointerInput(Unit) {
@@ -277,6 +282,7 @@ fun DawTimeline(
                     val gap = 2.dp.toPx()
                     val layout = TimelineLayout.compute(size.height.toFloat(), layerList.size, gap)
                     val ms = currentViewOffset + (offset.x * currentMsPerPixel).toLong()
+                    currentOnSeek(ms.coerceAtLeast(0L))
                     val hit = findRegionAt(
                         layerList, ms, offset.y,
                         layout.songTrackHeight, layout.layerHeight, layout.layerGap,

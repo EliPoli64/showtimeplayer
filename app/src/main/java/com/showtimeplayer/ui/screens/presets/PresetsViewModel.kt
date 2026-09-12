@@ -354,6 +354,18 @@ class PresetsViewModel(
                 selectedRegion.value = region
             }
         }
+        val streamId = region.id.toInt()
+        if (streamId in activeStreamIds) {
+            metronomeEngine.updateLayer(
+                MetronomeLayerConfig(
+                    id = streamId,
+                    bpm = region.bpm.toFloat(),
+                    timeSigNum = region.timeSignatureNum,
+                    timeSigDenom = region.timeSignatureDenom,
+                    volume = region.volume,
+                ),
+            )
+        }
     }
 
     fun moveRegion(regionId: Long, newStartMs: Long, newLayerId: Long?) {
@@ -580,6 +592,18 @@ class PresetsViewModel(
         songPlayer?.seekTo((pos - songOffsetMs.value).coerceAtLeast(0L))
     }
 
+    fun seekTo(positionMs: Long) {
+        val timelineDuration = timelineDurationMs()
+        val pos = positionMs.coerceIn(0L, timelineDuration)
+        playbackPositionMs.value = pos
+        songPlayer?.seekTo((pos - songOffsetMs.value).coerceAtLeast(0L))
+        if (isSongPlaying.value) {
+            playbackBaseTimelineMs = pos
+            playbackBaseNs = System.nanoTime()
+            resetMetronomeBase(pos)
+        }
+    }
+
     fun onScrubEnd() {
         if (wasPlayingBeforeScrub) {
             wasPlayingBeforeScrub = false
@@ -594,15 +618,15 @@ class PresetsViewModel(
         if (!metronomeInitialized) {
             metronomeInitialized = metronomeEngine.initialize()
         }
-        metronomeBaseNs = System.nanoTime()
-        metronomeBaseTimelineMs = playbackPositionMs.value
         metronomeEngine.start()
-        scheduleMetronomeStreams()
+        resetMetronomeBase(playbackPositionMs.value)
     }
 
-    private fun restartMetronomeBase() {
+    private fun restartMetronomeBase() = resetMetronomeBase(0L)
+
+    private fun resetMetronomeBase(positionMs: Long) {
         metronomeBaseNs = System.nanoTime()
-        metronomeBaseTimelineMs = 0L
+        metronomeBaseTimelineMs = positionMs
         scheduleMetronomeStreams()
     }
 
@@ -643,6 +667,7 @@ class PresetsViewModel(
                 bpm = region.bpm.toFloat(),
                 timeSigNum = region.timeSignatureNum,
                 timeSigDenom = region.timeSignatureDenom,
+                volume = region.volume,
             ),
         )
         activeStreamIds.add(streamId)

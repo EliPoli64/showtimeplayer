@@ -7,6 +7,7 @@ data class MetronomeLayerConfig(
     val bpm: Float,
     val timeSigNum: Int,
     val timeSigDenom: Int,
+    val volume: Float = 1.0f,
 )
 
 class MetronomeEngine {
@@ -40,7 +41,9 @@ class MetronomeEngine {
     }
 
     fun addLayer(config: MetronomeLayerConfig) {
-        nativeEngine.addStream(config.id, config.bpm, config.timeSigNum, config.timeSigDenom)
+        nativeEngine.addStream(
+            config.id, config.bpm, config.timeSigNum, config.timeSigDenom, config.volume,
+        )
     }
 
     fun removeLayer(id: Int) {
@@ -48,7 +51,9 @@ class MetronomeEngine {
     }
 
     fun updateLayer(config: MetronomeLayerConfig) {
-        nativeEngine.updateStream(config.id, config.bpm, config.timeSigNum, config.timeSigDenom)
+        nativeEngine.updateStream(
+            config.id, config.bpm, config.timeSigNum, config.timeSigDenom, config.volume,
+        )
     }
 
     fun triggerAll() {

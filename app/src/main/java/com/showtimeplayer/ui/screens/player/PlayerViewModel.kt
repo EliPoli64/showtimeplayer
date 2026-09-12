@@ -180,6 +180,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             bpm = region.bpm.toFloat(),
             timeSigNum = region.timeSignatureNum,
             timeSigDenom = region.timeSignatureDenom,
+            volume = region.volume,
         )
         metronomeEngine.addLayer(config)
         metronomeActiveStreams.add(streamId)

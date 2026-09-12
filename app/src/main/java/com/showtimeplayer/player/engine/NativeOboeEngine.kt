@@ -9,9 +9,9 @@ class NativeOboeEngine {
     external fun nativeStart(): Int
     external fun nativeStop()
     external fun nativeDestroy()
-    external fun nativeAddStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int)
+    external fun nativeAddStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int, volume: Float)
     external fun nativeRemoveStream(id: Int)
-    external fun nativeUpdateStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int)
+    external fun nativeUpdateStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int, volume: Float)
     external fun nativeTriggerAll()
 
     fun initEngine(sampleRate: Int = 44100, channelCount: Int = 2): Boolean {
@@ -30,16 +30,16 @@ class NativeOboeEngine {
         nativeDestroy()
     }
 
-    fun addStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int) {
-        nativeAddStream(id, bpm, timeSigNum, timeSigDenom)
+    fun addStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int, volume: Float) {
+        nativeAddStream(id, bpm, timeSigNum, timeSigDenom, volume)
     }
 
     fun removeStream(id: Int) {
         nativeRemoveStream(id)
     }
 
-    fun updateStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int) {
-        nativeUpdateStream(id, bpm, timeSigNum, timeSigDenom)
+    fun updateStream(id: Int, bpm: Float, timeSigNum: Int, timeSigDenom: Int, volume: Float) {
+        nativeUpdateStream(id, bpm, timeSigNum, timeSigDenom, volume)
     }
 
     fun triggerAll() {
