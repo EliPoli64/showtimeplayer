@@ -28,11 +28,13 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+// Purple-family palette drawn from Material 3's tonal scheme (deep violet → light
+// violet → plum → slate) so layer rows and count-in blocks harmonize with the app theme.
 val LAYER_COLORS = listOf(
-    0xFF4CAF50,
-    0xFF2196F3,
-    0xFFFF9800,
-    0xFFE91E63,
+    0xFF4F378B,
+    0xFF7F67BE,
+    0xFF8E4585,
+    0xFF625B71,
 )
 
 data class PresetWithTrack(
