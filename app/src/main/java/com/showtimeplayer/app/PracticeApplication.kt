@@ -6,11 +6,14 @@ import com.showtimeplayer.data.repository.PresetRepositoryImpl
 import com.showtimeplayer.data.repository.TrackRepositoryImpl
 import com.showtimeplayer.data.scanner.FolderPreferences
 import com.showtimeplayer.data.scanner.MediaStoreScanner
+import com.showtimeplayer.player.metronome.MetronomeEngine
 
 class PracticeApplication : Application() {
     val database: PracticeDatabase by lazy { PracticeDatabase.getInstance(this) }
 
     val folderPreferences: FolderPreferences by lazy { FolderPreferences(this) }
+
+    val metronomeEngine: MetronomeEngine by lazy { MetronomeEngine() }
 
     val trackRepository: TrackRepositoryImpl by lazy {
         TrackRepositoryImpl(

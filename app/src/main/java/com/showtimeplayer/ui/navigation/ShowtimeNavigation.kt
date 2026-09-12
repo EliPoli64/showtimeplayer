@@ -19,8 +19,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.launch
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -28,6 +30,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.showtimeplayer.data.db.entity.TrackEntity
+import com.showtimeplayer.data.repository.PresetRepositoryImpl
+import com.showtimeplayer.data.repository.PresetWithLayers
 import com.showtimeplayer.ui.screens.library.LibraryScreen
 import com.showtimeplayer.ui.screens.library.LibraryViewModel
 import com.showtimeplayer.ui.screens.albums.AlbumsScreen
@@ -96,10 +100,12 @@ fun ShowtimeNavigation(
     playerViewModel: PlayerViewModel,
     albumsViewModel: AlbumsViewModel,
     presetsViewModel: PresetsViewModel,
+    presetRepository: PresetRepositoryImpl,
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+    val scope = rememberCoroutineScope()
 
     fun navigateToPlayer() {
         navController.navigate(Screen.Player.route) {
@@ -182,8 +188,21 @@ fun ShowtimeNavigation(
                 PresetsScreen(
                     viewModel = presetsViewModel,
                     onPresetPlay = { preset, track ->
-                        playerViewModel.playTrack(track)
-                        navigateToPlayer()
+                        scope.launch {
+                            val layers = presetRepository.getLayersForPreset(preset.id)
+                            val layersWithRegions = layers.map { layer ->
+                                com.showtimeplayer.data.repository.MetronomeLayerWithRegions(
+                                    layer = layer,
+                                    regions = presetRepository.getRegionsForLayer(layer.id),
+                                )
+                            }
+                            val presetWithLayers = PresetWithLayers(
+                                preset = preset,
+                                layers = layersWithRegions,
+                            )
+                            playerViewModel.playWithLayers(track, presetWithLayers)
+                            navigateToPlayer()
+                        }
                     },
                 )
             }

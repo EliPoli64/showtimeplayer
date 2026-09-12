@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,12 +18,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -32,6 +38,7 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -42,12 +49,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.PresetEntity
 import com.showtimeplayer.data.db.entity.TrackEntity
-import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,12 +98,15 @@ private fun DawEditor(
     uiState: PresetsUiState,
     viewModel: PresetsViewModel,
 ) {
-    var regionToEdit by remember { mutableStateOf<MetronomeRegion?>(null) }
+    var trackSearchQuery by remember { mutableStateOf("") }
+    var showLayerManager by remember { mutableStateOf(false) }
+    val targetLayerId = uiState.layers.firstOrNull { it.layer.enabled }?.layer?.id
+        ?: uiState.layers.firstOrNull()?.layer?.id
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Edit Metronome") },
+                title = { Text(if (uiState.editingPreset != null) "Edit Metronome" else "Select Track") },
                 navigationIcon = {
                     IconButton(onClick = viewModel::cancelEditing) {
                         Icon(
@@ -108,123 +118,268 @@ private fun DawEditor(
             )
         },
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
-        ) {
-            // Preset name
-            OutlinedTextField(
-                value = uiState.presetName,
-                onValueChange = viewModel::updatePresetName,
-                label = { Text("Preset name") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Track name
-            Text(
-                text = uiState.selectedTrack?.title ?: "",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Layer stack
-            MetronomeLayerStack(
-                layers = uiState.layers,
-                selectedRegion = uiState.selectedRegion,
-                trackDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
-                onRegionTap = { region ->
-                    regionToEdit = region
-                    viewModel.selectRegion(region)
-                },
-                onAddRegion = viewModel::addRegion,
-                onAddLayer = viewModel::addLayer,
-                onRemoveLayer = viewModel::removeLayer,
-                onToggleLayer = viewModel::toggleLayerEnabled,
-                canAddLayer = uiState.canAddLayer,
-            )
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            // Save button
-            TextButton(
-                onClick = viewModel::savePreset,
-                modifier = Modifier.fillMaxWidth(),
+        if (uiState.editingPreset == null) {
+            // Track picker
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 16.dp),
             ) {
-                Text("Save")
+                OutlinedTextField(
+                    value = trackSearchQuery,
+                    onValueChange = { trackSearchQuery = it },
+                    label = { Text("Search tracks") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Filled.Search,
+                            contentDescription = null,
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val filteredTracks = if (trackSearchQuery.isBlank()) {
+                    uiState.allTracks
+                } else {
+                    uiState.allTracks.filter {
+                        it.title?.contains(trackSearchQuery, ignoreCase = true) == true ||
+                            it.artist?.contains(trackSearchQuery, ignoreCase = true) == true
+                    }
+                }
+
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    items(items = filteredTracks, key = { it.id }) { track ->
+                        ListItem(
+                            headlineContent = { Text(track.title ?: "Unknown") },
+                            supportingContent = { Text(track.artist ?: "") },
+                            leadingContent = {
+                                Icon(
+                                    imageVector = Icons.Filled.MusicNote,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(32.dp),
+                                )
+                            },
+                            modifier = Modifier.clickable {
+                                viewModel.selectTrackForCreation(track)
+                            },
+                        )
+                    }
+                }
+            }
+        } else {
+            // DAW editor
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding),
+            ) {
+                // Transport bar
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    IconButton(onClick = viewModel::toggleSongPlayback) {
+                        Icon(
+                            imageVector = if (uiState.isSongPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (uiState.isSongPlaying) "Pause" else "Play",
+                        )
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        OutlinedTextField(
+                            value = uiState.presetName,
+                            onValueChange = viewModel::updatePresetName,
+                            label = { Text("Preset name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+
+                // DAW Timeline
+                DawTimeline(
+                    waveformAmplitudes = uiState.waveformAmplitudes,
+                    layers = uiState.layers,
+                    trackDurationMs = uiState.selectedTrack?.durationMs ?: 0L,
+                    songOffsetMs = uiState.songOffsetMs,
+                    playbackPositionMs = uiState.playbackPositionMs,
+                    isPlaying = uiState.isSongPlaying,
+                    selectedRegionId = uiState.selectedRegion?.id,
+                    layerColors = LAYER_COLORS,
+                    onRegionTap = { region -> viewModel.selectRegion(region) },
+                    onRegionMove = { regionId, newStartMs, newLayerId ->
+                        viewModel.moveRegion(regionId, newStartMs, newLayerId)
+                    },
+                    onAddRegionAtPosition = { layerId, positionMs ->
+                        viewModel.addRegionAtPosition(layerId, positionMs)
+                    },
+                    onSongMove = viewModel::moveSong,
+                    onScrubStart = viewModel::onScrubStart,
+                    onScrub = viewModel::onScrub,
+                    onScrubEnd = viewModel::onScrubEnd,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 16.dp),
+                )
+
+                // Layer controls
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = { showLayerManager = true }) {
+                        Icon(
+                            imageVector = Icons.Filled.Tune,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text("Layers (${uiState.layers.size}/4)")
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (targetLayerId != null) {
+                            TextButton(onClick = {
+                                viewModel.addRegionAtPosition(targetLayerId, uiState.playbackPositionMs)
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Filled.Add,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text("Count-in")
+                            }
+                        }
+                    }
+                }
+
+                // Save button
+                TextButton(
+                    onClick = viewModel::savePreset,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                ) {
+                    Text("Save")
+                }
             }
         }
     }
 
-    regionToEdit?.let { region ->
+    uiState.selectedRegion?.let { region ->
         RegionEditSheet(
             region = region,
-            onDismiss = {
-                regionToEdit = null
-                viewModel.clearSelectedRegion()
-            },
+            onDismiss = viewModel::clearSelectedRegion,
             onBpmChanged = { newBpm -> viewModel.updateRegion(region.copy(bpm = newBpm)) },
             onTimeSigChanged = { num, denom ->
                 viewModel.updateRegion(region.copy(timeSignatureNum = num, timeSignatureDenom = denom))
             },
             onCountInBarsChanged = { bars -> viewModel.updateRegion(region.copy(countInBars = bars)) },
             onTapTempo = { viewModel.onTapTempo(region) },
-            onDelete = {
-                viewModel.removeRegion(region.id)
-                regionToEdit = null
-            },
+            onDelete = { viewModel.removeRegion(region.id) },
+        )
+    }
+
+    if (showLayerManager) {
+        LayerManagerDialog(
+            uiState = uiState,
+            onDismiss = { showLayerManager = false },
+            onAddLayer = viewModel::addLayer,
+            onToggleLayer = viewModel::toggleLayerEnabled,
+            onRemoveLayer = viewModel::removeLayer,
         )
     }
 }
 
 @Composable
-private fun MetronomeLayerStack(
-    layers: List<MetronomeLayerWithRegions>,
-    selectedRegion: MetronomeRegion?,
-    trackDurationMs: Long,
-    onRegionTap: (MetronomeRegion) -> Unit,
-    onAddRegion: (Long) -> Unit,
+private fun LayerManagerDialog(
+    uiState: PresetsUiState,
+    onDismiss: () -> Unit,
     onAddLayer: () -> Unit,
-    onRemoveLayer: (Long) -> Unit,
     onToggleLayer: (Long) -> Unit,
-    canAddLayer: Boolean,
+    onRemoveLayer: (Long) -> Unit,
 ) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        layers.forEachIndexed { index, layerWithRegions ->
-            MetronomeTrackRow(
-                layerWithRegions = layerWithRegions,
-                colorIndex = index,
-                selectedRegionId = selectedRegion?.id,
-                trackDurationMs = trackDurationMs,
-                onRegionTap = onRegionTap,
-                onAddRegion = { onAddRegion(layerWithRegions.layer.id) },
-                onRemove = { onRemoveLayer(layerWithRegions.layer.id) },
-                onToggleEnabled = { onToggleLayer(layerWithRegions.layer.id) },
-            )
-        }
-
-        if (canAddLayer) {
-            TextButton(
-                onClick = onAddLayer,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(" Add Layer")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Metronome Layers") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (uiState.layers.isEmpty()) {
+                    Text(
+                        text = "No layers yet. Add one to place count-ins.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                uiState.layers.forEachIndexed { index, layerWithRegions ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Color(
+                                        if (index < LAYER_COLORS.size) LAYER_COLORS[index]
+                                        else 0xFF888888,
+                                    ),
+                                ),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = layerWithRegions.layer.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text(
+                                text = "${layerWithRegions.regions.size} count-in(s)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = layerWithRegions.layer.enabled,
+                            onCheckedChange = { onToggleLayer(layerWithRegions.layer.id) },
+                        )
+                        IconButton(onClick = { onRemoveLayer(layerWithRegions.layer.id) }) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Remove layer",
+                            )
+                        }
+                    }
+                }
+                if (uiState.canAddLayer) {
+                    TextButton(onClick = onAddLayer) {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text("Add Layer")
+                    }
+                }
             }
-        }
-    }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done") }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

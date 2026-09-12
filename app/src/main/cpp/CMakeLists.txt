@@ -4,8 +4,7 @@ project(showtimeplayer_native)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# TODO: add Oboe (prefab) + SoundTouch sources here
-# find_package(oboe REQUIRED CONFIG)
+find_package(oboe REQUIRED CONFIG)
 
 add_library(
     showtimeplayer_native
@@ -18,5 +17,4 @@ add_library(
 target_include_directories(showtimeplayer_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 find_library(log-lib log)
-target_link_libraries(showtimeplayer_native ${log-lib} android OpenSLES)
-# TODO: target_link_libraries(showtimeplayer_native oboe::oboe soundtouch)
+target_link_libraries(showtimeplayer_native ${log-lib} android oboe::oboe)

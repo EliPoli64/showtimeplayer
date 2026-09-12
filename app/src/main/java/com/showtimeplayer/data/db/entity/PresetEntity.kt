@@ -27,5 +27,6 @@ data class PresetEntity(
     val pitchOffsetSemitones: Int = 0,
     val loopStartMs: Long? = null,
     val loopEndMs: Long? = null,
+    val songOffsetMs: Long = 0L,
     val updatedAt: Long = System.currentTimeMillis(),
 )

@@ -15,6 +15,7 @@ import com.showtimeplayer.data.db.entity.TrackEntity
 import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetRepositoryImpl
 import com.showtimeplayer.data.repository.TrackRepositoryImpl
+import com.showtimeplayer.player.metronome.MetronomeLayerConfig
 import com.showtimeplayer.util.AudioDecoder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 val LAYER_COLORS = listOf(
@@ -49,12 +51,15 @@ data class PresetsUiState(
     val selectedRegion: MetronomeRegion? = null,
     val isPreviewPlaying: Boolean = false,
     val isSongPlaying: Boolean = false,
+    val playbackPositionMs: Long = 0L,
+    val songOffsetMs: Long = 0L,
     val visibleStartMs: Float = 0f,
     val visibleDurationMs: Float = 10_000f,
     val waveformAmplitudes: List<Float> = emptyList(),
 ) {
     val activeLayerCount: Int get() = layers.count { it.layer.enabled }
     val canAddLayer: Boolean get() = layers.size < 4
+    val timelineDurationMs: Long get() = (selectedTrack?.durationMs ?: 0L) + songOffsetMs
 }
 
 class PresetsViewModel(
@@ -74,6 +79,8 @@ class PresetsViewModel(
     private val visibleDurationMs = MutableStateFlow(10_000f)
     private val _waveformAmplitudes = MutableStateFlow<List<Float>>(emptyList())
     private val isSongPlaying = MutableStateFlow(false)
+    private val playbackPositionMs = MutableStateFlow(0L)
+    private val songOffsetMs = MutableStateFlow(0L)
 
     private var previewPlayer: ExoPlayer? = null
     private var songPlayer: ExoPlayer? = null
@@ -81,6 +88,18 @@ class PresetsViewModel(
     private var tapResetJob: Job? = null
     private var waveformJob: Job? = null
     private var layersObservingJob: Job? = null
+    private var wasPlayingBeforeScrub = false
+
+    private val metronomeEngine =
+        (application as com.showtimeplayer.app.PracticeApplication).metronomeEngine
+    private var metronomeInitialized = false
+    private val metronomeJobs = mutableListOf<Job>()
+    private val activeStreamIds = mutableSetOf<Int>()
+    private var metronomeBaseNs = 0L
+    private var metronomeBaseTimelineMs = 0L
+    private var playbackClockJob: Job? = null
+    private var playbackBaseNs = 0L
+    private var playbackBaseTimelineMs = 0L
 
     val uiState: StateFlow<PresetsUiState> = combine(
         combine(
@@ -96,8 +115,10 @@ class PresetsViewModel(
         combine(
             isPreviewPlaying, visibleStartMs, visibleDurationMs, _waveformAmplitudes,
         ) { playing, visStart, visDur, waveform -> PreviewState(playing, visStart, visDur, waveform) },
-        isSongPlaying,
-    ) { (presets, tracks), edit, layerState, preview, songPlaying ->
+        combine(isSongPlaying, playbackPositionMs, songOffsetMs) { playing, pos, offset ->
+            SongState(playing, pos, offset)
+        },
+    ) { (presets, tracks), edit, layerState, preview, songState ->
         val presetsWithTracks = presets.map { preset ->
             PresetWithTrack(
                 preset = preset,
@@ -114,7 +135,9 @@ class PresetsViewModel(
             layers = layerState.layers,
             selectedRegion = layerState.selectedRegion,
             isPreviewPlaying = preview.isPlaying,
-            isSongPlaying = songPlaying,
+            isSongPlaying = songState.playing,
+            playbackPositionMs = songState.position,
+            songOffsetMs = songState.offset,
             visibleStartMs = preview.visibleStart,
             visibleDurationMs = preview.visibleDuration,
             waveformAmplitudes = preview.waveform,
@@ -140,6 +163,12 @@ class PresetsViewModel(
         val waveform: List<Float>,
     )
 
+    private data class SongState(
+        val playing: Boolean,
+        val position: Long,
+        val offset: Long,
+    )
+
     fun startCreation() {
         isEditing.value = true
         editingPreset.value = null
@@ -148,12 +177,14 @@ class PresetsViewModel(
         layers.value = emptyList()
         selectedRegion.value = null
         visibleStartMs.value = 0f
+        songOffsetMs.value = 0L
         stopPreview()
         stopSongPlayback()
     }
 
     fun selectTrackForCreation(track: TrackEntity) {
         selectedTrack.value = track
+        songOffsetMs.value = 0L
         if (presetName.value.isBlank()) {
             presetName.value = track.title ?: "Preset"
         }
@@ -164,6 +195,8 @@ class PresetsViewModel(
             val preset = presetRepository.getPreset(presetId)
             editingPreset.value = preset
             observeLayers(presetId)
+            loadWaveform()
+            initSongPlayer()
         }
     }
 
@@ -173,6 +206,7 @@ class PresetsViewModel(
         presetName.value = preset.name
         selectedRegion.value = null
         visibleStartMs.value = 0f
+        songOffsetMs.value = preset.songOffsetMs
         releasePreviewPlayer()
         viewModelScope.launch {
             val track = trackRepository.getTrack(preset.trackId)
@@ -180,6 +214,7 @@ class PresetsViewModel(
             observeLayers(preset.id)
             loadWaveform()
             initPreviewPlayer()
+            initSongPlayer()
         }
     }
 
@@ -231,8 +266,12 @@ class PresetsViewModel(
         val preset = editingPreset.value ?: return
         val name = presetName.value.ifBlank { selectedTrack.value?.title ?: "Preset" }
         viewModelScope.launch {
-            presetRepository.insert(
-                preset.copy(name = name, updatedAt = System.currentTimeMillis()),
+            presetRepository.update(
+                preset.copy(
+                    name = name,
+                    songOffsetMs = songOffsetMs.value,
+                    updatedAt = System.currentTimeMillis(),
+                ),
             )
             isEditing.value = false
             editingPreset.value = null
@@ -277,32 +316,90 @@ class PresetsViewModel(
     // -- Region operations --
 
     fun addRegion(layerId: Long) {
-        val track = selectedTrack.value ?: return
         val existingRegions = layers.value.find { it.layer.id == layerId }?.regions ?: emptyList()
-        val startMs = if (existingRegions.isNotEmpty()) {
-            existingRegions.maxOf { it.endMs ?: it.startMs }
-        } else {
-            0L
-        }
+        val startMs = existingRegions.maxOfOrNull { it.endMs ?: it.startMs } ?: playbackPositionMs.value
+        addRegionAtPosition(layerId, startMs)
+    }
+
+    fun addRegionAtPosition(layerId: Long, positionMs: Long) {
+        val timelineDuration = timelineDurationMs()
+        val existingRegions = layers.value.find { it.layer.id == layerId }?.regions ?: emptyList()
+        val defaultBpm = 120
+        val defaultCountInBars = 2
+        val defaultTimeSigNum = 4
+        val defaultCountInDurationMs =
+            defaultCountInBars * (60_000L / defaultBpm) * defaultTimeSigNum
+        // Place the downbeat at the tapped position, but keep the whole count-in on the timeline.
+        val startMs = maxOf(positionMs, defaultCountInDurationMs).coerceIn(0L, timelineDuration)
         viewModelScope.launch {
-            presetRepository.insertRegion(
-                MetronomeRegion(
-                    layerId = layerId,
-                    startMs = startMs,
-                    endMs = null,
-                    bpm = 120,
-                    timeSignatureNum = 4,
-                    timeSignatureDenom = 4,
-                    countInBars = 2,
-                    sortOrder = existingRegions.size,
-                ),
+            val region = MetronomeRegion(
+                layerId = layerId,
+                startMs = startMs,
+                endMs = null,
+                bpm = defaultBpm,
+                timeSignatureNum = defaultTimeSigNum,
+                timeSignatureDenom = 4,
+                countInBars = defaultCountInBars,
+                sortOrder = existingRegions.size,
             )
+            val id = presetRepository.insertRegion(region)
+            selectedRegion.value = region.copy(id = id)
         }
     }
 
     fun updateRegion(region: MetronomeRegion) {
-        viewModelScope.launch { presetRepository.updateRegion(region) }
+        viewModelScope.launch {
+            presetRepository.updateRegion(region)
+            if (selectedRegion.value?.id == region.id) {
+                selectedRegion.value = region
+            }
+        }
     }
+
+    fun moveRegion(regionId: Long, newStartMs: Long, newLayerId: Long?) {
+        val region = layers.value.flatMap { it.regions }.find { it.id == regionId } ?: return
+        val timelineDuration = timelineDurationMs()
+        val minStart = countInDurationMs(region).coerceAtMost(timelineDuration)
+        val clampedStart = newStartMs.coerceIn(minStart, timelineDuration)
+        val deltaMs = clampedStart - region.startMs
+        val newEnd = region.endMs?.let { (it + deltaMs).coerceIn(0L, timelineDuration) }
+        val updated = region.copy(
+            startMs = clampedStart,
+            endMs = newEnd,
+            layerId = newLayerId ?: region.layerId,
+        )
+        viewModelScope.launch {
+            presetRepository.updateRegion(updated)
+            if (selectedRegion.value?.id == regionId) {
+                selectedRegion.value = updated
+            }
+        }
+    }
+
+    private fun countInDurationMs(region: MetronomeRegion): Long {
+        if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) return 0L
+        return region.countInBars * (60_000L / region.bpm) * region.timeSignatureNum
+    }
+
+    fun moveSong(deltaMs: Long) {
+        val trackDuration = selectedTrack.value?.durationMs ?: 0L
+        val newOffset = (songOffsetMs.value + deltaMs).coerceIn(0L, trackDuration)
+        songOffsetMs.value = newOffset
+        val preset = editingPreset.value
+        if (preset != null) {
+            val updated = preset.copy(
+                songOffsetMs = newOffset,
+                updatedAt = System.currentTimeMillis(),
+            )
+            editingPreset.value = updated
+            viewModelScope.launch {
+                presetRepository.update(updated)
+            }
+        }
+    }
+
+    private fun timelineDurationMs(): Long =
+        (selectedTrack.value?.durationMs ?: 0L) + songOffsetMs.value
 
     fun removeRegion(regionId: Long) {
         viewModelScope.launch {
@@ -325,8 +422,13 @@ class PresetsViewModel(
 
     fun updateCenterMs(positionMs: Long) {
         val preset = editingPreset.value ?: return
+        val updated = preset.copy(
+            loopStartMs = positionMs.coerceAtLeast(0),
+            songOffsetMs = songOffsetMs.value,
+        )
+        editingPreset.value = updated
         viewModelScope.launch {
-            presetRepository.insert(preset.copy(loopStartMs = positionMs.coerceAtLeast(0)))
+            presetRepository.update(updated)
         }
     }
 
@@ -371,30 +473,195 @@ class PresetsViewModel(
     }
 
     fun toggleSongPlayback() {
-        if (isSongPlaying.value) {
-            stopSongPlayback()
-        } else {
-            startSongPlayback()
-        }
+        if (isSongPlaying.value) pauseSongPlayback() else startSongPlayback()
     }
 
     private fun startSongPlayback() {
+        if (songPlayer == null) initSongPlayer()
+        val player = songPlayer ?: return
+        val timelineDuration = timelineDurationMs()
+        if (timelineDuration <= 0) return
+
+        if (playbackPositionMs.value >= timelineDuration) {
+            playbackPositionMs.value = 0L
+        }
+        playbackBaseTimelineMs = playbackPositionMs.value
+        playbackBaseNs = System.nanoTime()
+        isSongPlaying.value = true
+        player.pause()
+        startPlaybackClock()
+        startEditorMetronome()
+    }
+
+    private fun pauseSongPlayback() {
+        isSongPlaying.value = false
+        playbackClockJob?.cancel()
+        playbackClockJob = null
+        songPlayer?.pause()
+        stopEditorMetronome()
+    }
+
+    private fun initSongPlayer() {
+        releaseSongPlayer()
         val track = selectedTrack.value ?: return
-        stopSongPlayback()
         val player = ExoPlayer.Builder(application).build()
         songPlayer = player
         player.setMediaItem(MediaItem.Builder().setUri(Uri.parse(track.uri)).build())
-        player.repeatMode = Player.REPEAT_MODE_ALL
+        player.repeatMode = Player.REPEAT_MODE_OFF
         player.prepare()
-        player.play()
-        isSongPlaying.value = true
+    }
+
+    private fun startPlaybackClock() {
+        playbackClockJob?.cancel()
+        playbackClockJob = viewModelScope.launch {
+            while (isSongPlaying.value) {
+                val timeline = playbackBaseTimelineMs +
+                    (System.nanoTime() - playbackBaseNs) / 1_000_000
+                val timelineDuration = timelineDurationMs()
+                if (timelineDuration > 0 && timeline >= timelineDuration) {
+                    playbackBaseTimelineMs = 0L
+                    playbackBaseNs = System.nanoTime()
+                    playbackPositionMs.value = 0L
+                    syncPlayerToTimeline(0L)
+                    restartMetronomeBase()
+                } else {
+                    playbackPositionMs.value = timeline.coerceAtLeast(0)
+                    syncPlayerToTimeline(timeline)
+                }
+                delay(16)
+            }
+        }
+    }
+
+    private fun syncPlayerToTimeline(timelineMs: Long) {
+        val player = songPlayer ?: return
+        val audioMs = timelineMs - songOffsetMs.value
+        if (audioMs < 0) {
+            if (player.isPlaying) player.pause()
+            return
+        }
+        if (!player.isPlaying) {
+            player.seekTo(audioMs)
+            player.play()
+        } else if (abs(player.currentPosition - audioMs) > 250) {
+            player.seekTo(audioMs)
+        }
     }
 
     fun stopSongPlayback() {
+        releaseSongPlayer()
+    }
+
+    private fun releaseSongPlayer() {
+        isSongPlaying.value = false
+        playbackClockJob?.cancel()
+        playbackClockJob = null
+        stopEditorMetronome()
         songPlayer?.let { try { it.stop(); it.release() } catch (_: Exception) {} }
         songPlayer = null
-        isSongPlaying.value = false
+        playbackPositionMs.value = 0L
     }
+
+    fun onScrubStart() {
+        wasPlayingBeforeScrub = isSongPlaying.value
+        if (isSongPlaying.value) {
+            isSongPlaying.value = false
+            playbackClockJob?.cancel()
+            playbackClockJob = null
+            songPlayer?.pause()
+            stopEditorMetronome()
+        }
+    }
+
+    fun onScrub(positionMs: Long) {
+        val timelineDuration = timelineDurationMs()
+        val pos = positionMs.coerceIn(0L, timelineDuration)
+        playbackPositionMs.value = pos
+        songPlayer?.seekTo((pos - songOffsetMs.value).coerceAtLeast(0L))
+    }
+
+    fun onScrubEnd() {
+        if (wasPlayingBeforeScrub) {
+            wasPlayingBeforeScrub = false
+            startSongPlayback()
+        }
+        wasPlayingBeforeScrub = false
+    }
+
+    // -- Editor metronome preview --
+
+    private fun startEditorMetronome() {
+        if (!metronomeInitialized) {
+            metronomeInitialized = metronomeEngine.initialize()
+        }
+        metronomeBaseNs = System.nanoTime()
+        metronomeBaseTimelineMs = playbackPositionMs.value
+        metronomeEngine.start()
+        scheduleMetronomeStreams()
+    }
+
+    private fun restartMetronomeBase() {
+        metronomeBaseNs = System.nanoTime()
+        metronomeBaseTimelineMs = 0L
+        scheduleMetronomeStreams()
+    }
+
+    private fun stopEditorMetronome() {
+        metronomeJobs.forEach { it.cancel() }
+        metronomeJobs.clear()
+        for (id in activeStreamIds.toList()) {
+            metronomeEngine.removeLayer(id)
+        }
+        activeStreamIds.clear()
+        metronomeEngine.stop()
+    }
+
+    private fun scheduleMetronomeStreams() {
+        metronomeJobs.forEach { it.cancel() }
+        metronomeJobs.clear()
+        val enabledLayers = layers.value.filter { it.layer.enabled }
+        for (layer in enabledLayers) {
+            for (region in layer.regions) {
+                metronomeJobs.add(viewModelScope.launch { runCountInStream(region) })
+            }
+        }
+    }
+
+    private suspend fun runCountInStream(region: MetronomeRegion) {
+        if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) return
+        val beatMs = 60_000L / region.bpm
+        val countInDurationMs = region.countInBars * beatMs * region.timeSignatureNum
+        val countInStartMs = region.startMs - countInDurationMs
+        val countInEndMs = region.startMs
+        if (countInEndMs <= currentMetronomeTimeline()) return
+        if (!waitUntilMetronomeTime(countInStartMs)) return
+
+        val streamId = region.id.toInt()
+        metronomeEngine.addLayer(
+            MetronomeLayerConfig(
+                id = streamId,
+                bpm = region.bpm.toFloat(),
+                timeSigNum = region.timeSignatureNum,
+                timeSigDenom = region.timeSignatureDenom,
+            ),
+        )
+        activeStreamIds.add(streamId)
+
+        waitUntilMetronomeTime(countInEndMs)
+        metronomeEngine.removeLayer(streamId)
+        activeStreamIds.remove(streamId)
+    }
+
+    private suspend fun waitUntilMetronomeTime(targetMs: Long): Boolean {
+        while (true) {
+            val remaining = targetMs - currentMetronomeTimeline()
+            if (remaining <= 0) return true
+            delay(remaining.coerceAtMost(100))
+        }
+    }
+
+    private fun currentMetronomeTimeline(): Long =
+        metronomeBaseTimelineMs + (System.nanoTime() - metronomeBaseNs) / 1_000_000
 
     fun onTapTempo(region: MetronomeRegion) {
         val now = System.currentTimeMillis()
@@ -427,6 +694,8 @@ class PresetsViewModel(
         releasePreviewPlayer()
         stopSongPlayback()
         layersObservingJob?.cancel()
+        playbackClockJob?.cancel()
+        metronomeJobs.forEach { it.cancel() }
         super.onCleared()
     }
 

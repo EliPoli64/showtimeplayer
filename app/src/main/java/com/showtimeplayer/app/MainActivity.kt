@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
                     playerViewModel = playerViewModel,
                     albumsViewModel = albumsViewModel,
                     presetsViewModel = presetsViewModel,
+                    presetRepository = (application as PracticeApplication).presetRepository,
                 )
             }
         }

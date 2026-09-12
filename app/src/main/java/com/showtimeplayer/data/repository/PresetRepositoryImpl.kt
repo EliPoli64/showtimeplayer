@@ -31,6 +31,8 @@ class PresetRepositoryImpl(
 
     suspend fun insert(preset: PresetEntity): Long = presetDao.insert(preset)
 
+    suspend fun update(preset: PresetEntity) = presetDao.update(preset)
+
     suspend fun delete(preset: PresetEntity) = presetDao.delete(preset)
 
     suspend fun deleteById(id: Long) = presetDao.deleteById(id)

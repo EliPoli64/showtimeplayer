@@ -1,9 +1,6 @@
 package com.showtimeplayer.ui.screens.player
 
 import android.app.Application
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioTrack
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -14,8 +11,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
-import com.showtimeplayer.data.db.entity.PresetEntity
+import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.TrackEntity
+import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
+import com.showtimeplayer.data.repository.PresetWithLayers
+import com.showtimeplayer.player.metronome.MetronomeLayerConfig
 import com.showtimeplayer.player.service.PlaybackService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -27,10 +27,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.PI
 import kotlin.math.max
-import kotlin.math.sin
-import kotlin.math.abs
 
 data class PlayerUiState(
     val currentTrack: TrackEntity? = null,
@@ -52,15 +49,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
-    // Mirror of Media3 playlist since we can't serialize TrackEntity into MediaItem
+    private val metronomeEngine =
+        (application as com.showtimeplayer.app.PracticeApplication).metronomeEngine
+
     private val queueTracks = mutableListOf<TrackEntity>()
+    private val metronomeJobs = mutableListOf<Job>()
     private var countInJob: Job? = null
     private var songStartTimeNs: Long = 0L
-    private var countInEndMs: Long = 0L
     private var isCountInActive: Boolean = false
     private var isPaused: Boolean = false
     private var pauseAccumulatedNs: Long = 0L
     private var lastResumeNs: Long = 0L
+    private var metronomeActiveStreams = mutableSetOf<Int>()
 
     init {
         val sessionToken = SessionToken(
@@ -78,6 +78,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             listener = PlayerListener()
             mediaController.addListener(listener!!)
             startProgressUpdates()
+            metronomeEngine.initialize()
         }
     }
 
@@ -85,13 +86,138 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playTrackAsQueue(listOf(track), 0)
     }
 
-    fun playWithCountIn(track: TrackEntity, preset: PresetEntity) {
-        countInJob?.cancel()
+    fun playWithLayers(track: TrackEntity, presetWithLayers: PresetWithLayers) {
+        cancelMetronome()
         isCountInActive = false
         isPaused = false
         pauseAccumulatedNs = 0L
 
-        playTrack(track)
+        if (!::mediaController.isInitialized) return
+
+        val enabledLayers = presetWithLayers.layers.filter { it.layer.enabled && it.regions.isNotEmpty() }
+        val songOffsetMs = presetWithLayers.preset.songOffsetMs.coerceAtLeast(0L)
+
+        queueTracks.clear()
+        queueTracks.add(track)
+        _uiState.update {
+            it.copy(
+                currentTrack = track,
+                error = null,
+                queue = listOf(track),
+                currentQueueIndex = 0,
+                isCountInActive = false,
+            )
+        }
+        mediaController.setMediaItems(listOf(trackToMediaItem(track)), 0, 0L)
+        mediaController.prepare()
+
+        if (enabledLayers.isEmpty() && songOffsetMs <= 0) {
+            mediaController.play()
+            return
+        }
+
+        countInJob = viewModelScope.launch {
+            awaitReady()
+
+            songStartTimeNs = System.nanoTime()
+            lastResumeNs = songStartTimeNs
+            isCountInActive = enabledLayers.isNotEmpty()
+            _uiState.update { it.copy(isCountInActive = isCountInActive) }
+
+            metronomeEngine.start()
+
+            var earliestBeat1Ms = Long.MAX_VALUE
+
+            for (layerWithRegions in enabledLayers) {
+                for (region in layerWithRegions.regions) {
+                    val job = launch { scheduleRegion(layerWithRegions, region) }
+                    metronomeJobs.add(job)
+
+                    if (region.countInBars > 0 && region.bpm > 0) {
+                        val beatIntervalMs = 60_000L / region.bpm
+                        val beat1Ms = region.startMs
+                        if (beat1Ms < earliestBeat1Ms) {
+                            earliestBeat1Ms = beat1Ms
+                        }
+                    }
+                }
+            }
+
+            if (earliestBeat1Ms == Long.MAX_VALUE) {
+                isCountInActive = false
+                _uiState.update { it.copy(isCountInActive = false) }
+            } else {
+                _uiState.update { it.copy(beat1Ms = earliestBeat1Ms) }
+            }
+
+            // The song audio starts after the preset's timeline offset (lead-in silence).
+            if (songOffsetMs > 0) {
+                preciseDelay(songOffsetMs)
+            }
+            if (!isPaused) {
+                mediaController.play()
+            }
+        }
+    }
+
+    private suspend fun scheduleRegion(
+        layerWithRegions: MetronomeLayerWithRegions,
+        region: MetronomeRegion,
+    ) {
+        if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) return
+
+        val beatIntervalMs = 60_000L / region.bpm
+        val countInDurationMs = region.countInBars * beatIntervalMs * region.timeSignatureNum
+        val countInStartMs = (region.startMs - countInDurationMs).coerceAtLeast(0L)
+        val countInEndMs = region.startMs
+
+        preciseDelay(countInStartMs)
+        if (countInEndMs <= elapsedMsSinceStart()) return
+
+        val streamId = region.id.toInt()
+        val config = MetronomeLayerConfig(
+            id = streamId,
+            bpm = region.bpm.toFloat(),
+            timeSigNum = region.timeSignatureNum,
+            timeSigDenom = region.timeSignatureDenom,
+        )
+        metronomeEngine.addLayer(config)
+        metronomeActiveStreams.add(streamId)
+
+        preciseDelay(countInEndMs)
+        metronomeEngine.removeLayer(streamId)
+        metronomeActiveStreams.remove(streamId)
+    }
+
+    private fun elapsedMsSinceStart(): Long {
+        if (songStartTimeNs <= 0) return 0
+        val elapsedNs = System.nanoTime() - songStartTimeNs - pauseAccumulatedNs
+        return (elapsedNs / 1_000_000).coerceAtLeast(0)
+    }
+
+    private suspend fun preciseDelay(targetMs: Long) {
+        while (true) {
+            if (isPaused) {
+                delay(10)
+                continue
+            }
+            val elapsed = elapsedMsSinceStart()
+            val remaining = targetMs - elapsed
+            if (remaining <= 0) break
+            delay(remaining.coerceAtMost(50))
+        }
+    }
+
+    private fun cancelMetronome() {
+        countInJob?.cancel()
+        countInJob = null
+        metronomeJobs.forEach { it.cancel() }
+        metronomeJobs.clear()
+        for (streamId in metronomeActiveStreams) {
+            metronomeEngine.removeLayer(streamId)
+        }
+        metronomeActiveStreams.clear()
+        metronomeEngine.stop()
     }
 
     private suspend fun awaitReady(): Boolean {
@@ -115,73 +241,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         return true
     }
 
-    private suspend fun awaitIsPlaying(): Boolean {
-        if (!::mediaController.isInitialized) return false
-        if (mediaController.isPlaying) return true
-
-        val deferred = CompletableDeferred<Unit>()
-        val playingListener = object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    deferred.complete(Unit)
-                }
-            }
-        }
-        mediaController.addListener(playingListener)
-        try {
-            deferred.await()
-        } finally {
-            mediaController.removeListener(playingListener)
-        }
-        return true
-    }
-
-    private fun playClick(accent: Boolean) {
-        val sampleRate = 44100
-        val durationMs = if (accent) 15 else 10
-        val frequency = if (accent) 1000.0 else 800.0
-        val amplitude = if (accent) 0.8 else 0.4
-        val numSamples = sampleRate * durationMs / 1000
-
-        val buffer = ShortArray(numSamples)
-        for (i in 0 until numSamples) {
-            val t = i.toDouble() / sampleRate
-            val envelope = Math.exp(-t * 200.0) // fast exponential decay
-            val sample = sin(2.0 * PI * frequency * t) * amplitude * envelope
-            buffer[i] = (sample * Short.MAX_VALUE).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-        }
-
-        val bufferSize = buffer.size * 2 // 16-bit PCM = 2 bytes per sample
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
-            )
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setSampleRate(sampleRate)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build()
-            )
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STATIC)
-            .build()
-
-        audioTrack.write(buffer, 0, buffer.size)
-        Thread.sleep(15)
-        audioTrack.play()
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            audioTrack.release()
-        }, durationMs + 100L)
-    }
-
     fun playTrackAsQueue(tracks: List<TrackEntity>, startIndex: Int) {
         if (!::mediaController.isInitialized || tracks.isEmpty()) return
 
-        countInJob?.cancel()
+        cancelMetronome()
         isCountInActive = false
         isPaused = false
         pauseAccumulatedNs = 0L
@@ -197,6 +260,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 error = null,
                 queue = tracks.toList(),
                 currentQueueIndex = startIndex,
+                isCountInActive = false,
             )
         }
 
@@ -241,6 +305,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun clearQueue() {
         if (!::mediaController.isInitialized) return
+        cancelMetronome()
         mediaController.clearMediaItems()
         queueTracks.clear()
         _uiState.update {
@@ -251,6 +316,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 isPlaying = false,
                 positionMs = 0L,
                 durationMs = 0L,
+                isCountInActive = false,
             )
         }
     }
@@ -261,13 +327,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (fromIndex < 0 || fromIndex >= mediaController.mediaItemCount) return
         if (toIndex < 0 || toIndex >= mediaController.mediaItemCount) return
 
-        // Move in mirror list
         val item = queueTracks.removeAt(fromIndex)
         queueTracks.add(toIndex, item)
 
-        // Move in Media3 player
         mediaController.moveMediaItem(fromIndex, toIndex)
-
         syncQueueFromController()
     }
 
@@ -278,12 +341,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             if (isCountInActive) {
                 isPaused = true
                 pauseAccumulatedNs += System.nanoTime() - lastResumeNs
+                metronomeEngine.stop()
             }
         } else {
             mediaController.play()
             if (isCountInActive) {
                 isPaused = false
                 lastResumeNs = System.nanoTime()
+                metronomeEngine.start()
             }
         }
     }
@@ -291,7 +356,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun seekTo(positionMs: Long) {
         if (!::mediaController.isInitialized) return
         if (isCountInActive) {
-            countInJob?.cancel()
+            cancelMetronome()
             isCountInActive = false
             _uiState.update { it.copy(isCountInActive = false) }
         }
@@ -321,7 +386,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val currentIdx = mediaController.currentMediaItemIndex
         val count = mediaController.mediaItemCount
 
-        // Rebuild queue from our mirror list, clamping to available count
         val tracks = queueTracks.take(count)
         val currentTrack = tracks.getOrNull(currentIdx)
 
@@ -352,7 +416,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             while (true) {
                 if (isCountInActive && !isPaused && songStartTimeNs > 0) {
-                    // Compute position from wall clock during count-in
                     val elapsedNs = System.nanoTime() - songStartTimeNs - pauseAccumulatedNs
                     val pos = (elapsedNs / 1_000_000).coerceAtLeast(0)
                     _uiState.update {
@@ -396,8 +459,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
                 Player.STATE_ENDED -> {
+                    cancelMetronome()
+                    isCountInActive = false
                     _uiState.update {
-                        it.copy(isPlaying = false, positionMs = 0L)
+                        it.copy(isPlaying = false, positionMs = 0L, isCountInActive = false)
                     }
                 }
                 Player.STATE_IDLE -> {
@@ -418,7 +483,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
-        countInJob?.cancel()
+        cancelMetronome()
         listener?.let { mediaController.removeListener(it) }
         mediaController.release()
         super.onCleared()

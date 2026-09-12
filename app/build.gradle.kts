@@ -23,6 +23,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++20"
+                arguments += "-DANDROID_STL=c++_shared"
             }
         }
     }
@@ -46,6 +47,7 @@ android {
     }
     buildFeatures {
         compose = true
+        prefab = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.15"
@@ -83,7 +85,5 @@ dependencies {
     implementation(libs.material.icons.extended)
     implementation(libs.datastore.preferences)
     implementation(libs.documentfile)
+    implementation("com.google.oboe:oboe:1.10.0")
 }
-
-// TODO: add Oboe + SoundTouch via prefab / manual CMake once DSP work starts
-// e.g. implementation("com.google.oboe:oboe:1.9.2")
