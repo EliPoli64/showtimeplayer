@@ -1,0 +1,3 @@
+./gradlew installDebug;
+adb shell am start -n com.showtimeplayer/.app.MainActivity;
+sudo chown -R $(whoami) /home/elipoli/projs/showtimeplayer/app/build;
