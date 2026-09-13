@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.showtimeplayer.data.db.entity.MetronomeLayer
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 // Purple-family palette drawn from Material 3's tonal scheme (deep violet → light
@@ -35,6 +37,22 @@ val LAYER_COLORS = listOf(
     0xFF7F67BE,
     0xFF8E4585,
     0xFF625B71,
+)
+
+const val MIN_PLAYBACK_RATE = 0.25f
+const val MAX_PLAYBACK_RATE = 2.0f
+const val MAX_PITCH_SEMITONES = 12
+
+const val DEFAULT_BPM = 120
+const val DEFAULT_TIME_SIG_NUM = 4
+const val DEFAULT_TIME_SIG_DENOM = 4
+const val DEFAULT_COUNT_IN_BARS = 2
+const val DEFAULT_VOLUME = 1.0f
+
+data class SongSettingsState(
+    val playbackRate: Float = 1.0f,
+    val pitchOffsetSemitones: Int = 0,
+    val pitchFollowsSpeed: Boolean = false,
 )
 
 data class PresetWithTrack(
@@ -84,6 +102,10 @@ class PresetsViewModel(
     private val playbackPositionMs = MutableStateFlow(0L)
     private val songOffsetMs = MutableStateFlow(0L)
 
+    private val playbackRate = MutableStateFlow(1.0f)
+    private val pitchOffsetSemitones = MutableStateFlow(0)
+    private val pitchFollowsSpeed = MutableStateFlow(false)
+
     private var previewPlayer: ExoPlayer? = null
     private var songPlayer: ExoPlayer? = null
     private val tapTimes = mutableListOf<Long>()
@@ -91,17 +113,22 @@ class PresetsViewModel(
     private var waveformJob: Job? = null
     private var layersObservingJob: Job? = null
     private var wasPlayingBeforeScrub = false
+    private var persistSettingsJob: Job? = null
 
     private val metronomeEngine =
         (application as com.showtimeplayer.app.PracticeApplication).metronomeEngine
     private var metronomeInitialized = false
     private val metronomeJobs = mutableListOf<Job>()
     private val activeStreamIds = mutableSetOf<Int>()
-    private var metronomeBaseNs = 0L
-    private var metronomeBaseTimelineMs = 0L
     private var playbackClockJob: Job? = null
-    private var playbackBaseNs = 0L
-    private var playbackBaseTimelineMs = 0L
+    // Sub-millisecond accumulator so the clock doesn't drift when scaled by the rate.
+    private var clockPositionMs = 0.0
+
+    val songSettingsState: StateFlow<SongSettingsState> = combine(
+        playbackRate, pitchOffsetSemitones, pitchFollowsSpeed,
+    ) { rate, pitch, follows ->
+        SongSettingsState(rate, pitch, follows)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SongSettingsState())
 
     val uiState: StateFlow<PresetsUiState> = combine(
         combine(
@@ -180,6 +207,9 @@ class PresetsViewModel(
         selectedRegion.value = null
         visibleStartMs.value = 0f
         songOffsetMs.value = 0L
+        playbackRate.value = 1.0f
+        pitchOffsetSemitones.value = 0
+        pitchFollowsSpeed.value = false
         stopPreview()
         stopSongPlayback()
     }
@@ -187,6 +217,9 @@ class PresetsViewModel(
     fun selectTrackForCreation(track: TrackEntity) {
         selectedTrack.value = track
         songOffsetMs.value = 0L
+        playbackRate.value = 1.0f
+        pitchOffsetSemitones.value = 0
+        pitchFollowsSpeed.value = false
         if (presetName.value.isBlank()) {
             presetName.value = track.title ?: "Preset"
         }
@@ -209,6 +242,9 @@ class PresetsViewModel(
         selectedRegion.value = null
         visibleStartMs.value = 0f
         songOffsetMs.value = preset.songOffsetMs
+        playbackRate.value = preset.playbackRate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        pitchOffsetSemitones.value = preset.pitchOffsetSemitones.coerceIn(-MAX_PITCH_SEMITONES, MAX_PITCH_SEMITONES)
+        pitchFollowsSpeed.value = preset.pitchFollowsSpeed
         releasePreviewPlayer()
         viewModelScope.launch {
             val track = trackRepository.getTrack(preset.trackId)
@@ -267,11 +303,15 @@ class PresetsViewModel(
     fun savePreset() {
         val preset = editingPreset.value ?: return
         val name = presetName.value.ifBlank { selectedTrack.value?.title ?: "Preset" }
+        persistSettingsJob?.cancel()
         viewModelScope.launch {
             presetRepository.update(
                 preset.copy(
                     name = name,
                     songOffsetMs = songOffsetMs.value,
+                    playbackRate = playbackRate.value,
+                    pitchOffsetSemitones = pitchOffsetSemitones.value,
+                    pitchFollowsSpeed = pitchFollowsSpeed.value,
                     updatedAt = System.currentTimeMillis(),
                 ),
             )
@@ -326,11 +366,8 @@ class PresetsViewModel(
     fun addRegionAtPosition(layerId: Long, positionMs: Long) {
         val timelineDuration = timelineDurationMs()
         val existingRegions = layers.value.find { it.layer.id == layerId }?.regions ?: emptyList()
-        val defaultBpm = 120
-        val defaultCountInBars = 2
-        val defaultTimeSigNum = 4
         val defaultCountInDurationMs =
-            defaultCountInBars * (60_000L / defaultBpm) * defaultTimeSigNum
+            DEFAULT_COUNT_IN_BARS * (60_000L / DEFAULT_BPM) * DEFAULT_TIME_SIG_NUM
         // Place the downbeat at the tapped position, but keep the whole count-in on the timeline.
         val startMs = maxOf(positionMs, defaultCountInDurationMs).coerceIn(0L, timelineDuration)
         viewModelScope.launch {
@@ -338,15 +375,29 @@ class PresetsViewModel(
                 layerId = layerId,
                 startMs = startMs,
                 endMs = null,
-                bpm = defaultBpm,
-                timeSignatureNum = defaultTimeSigNum,
-                timeSignatureDenom = 4,
-                countInBars = defaultCountInBars,
+                bpm = DEFAULT_BPM,
+                timeSignatureNum = DEFAULT_TIME_SIG_NUM,
+                timeSignatureDenom = DEFAULT_TIME_SIG_DENOM,
+                countInBars = DEFAULT_COUNT_IN_BARS,
+                volume = DEFAULT_VOLUME,
                 sortOrder = existingRegions.size,
             )
             val id = presetRepository.insertRegion(region)
             selectedRegion.value = region.copy(id = id)
         }
+    }
+
+    fun resetRegion(regionId: Long) {
+        val region = layers.value.flatMap { it.regions }.find { it.id == regionId } ?: return
+        updateRegion(
+            region.copy(
+                bpm = DEFAULT_BPM,
+                timeSignatureNum = DEFAULT_TIME_SIG_NUM,
+                timeSignatureDenom = DEFAULT_TIME_SIG_DENOM,
+                countInBars = DEFAULT_COUNT_IN_BARS,
+                volume = DEFAULT_VOLUME,
+            ),
+        )
     }
 
     fun updateRegion(region: MetronomeRegion) {
@@ -361,7 +412,7 @@ class PresetsViewModel(
             metronomeEngine.updateLayer(
                 MetronomeLayerConfig(
                     id = streamId,
-                    bpm = region.bpm.toFloat(),
+                    bpm = region.bpm.toFloat() * playbackRate.value,
                     timeSigNum = region.timeSignatureNum,
                     timeSigDenom = region.timeSignatureDenom,
                     volume = region.volume,
@@ -497,11 +548,10 @@ class PresetsViewModel(
         if (timelineDuration <= 0) return
 
         if (playbackPositionMs.value >= timelineDuration) {
-            playbackPositionMs.value = 0L
+            setTimelinePosition(0L)
         }
-        playbackBaseTimelineMs = playbackPositionMs.value
-        playbackBaseNs = System.nanoTime()
         isSongPlaying.value = true
+        applySongParameters()
         player.pause()
         startPlaybackClock()
         startEditorMetronome()
@@ -522,25 +572,26 @@ class PresetsViewModel(
         songPlayer = player
         player.setMediaItem(MediaItem.Builder().setUri(Uri.parse(track.uri)).build())
         player.repeatMode = Player.REPEAT_MODE_OFF
+        player.playbackParameters = currentPlaybackParameters()
         player.prepare()
     }
 
     private fun startPlaybackClock() {
         playbackClockJob?.cancel()
         playbackClockJob = viewModelScope.launch {
+            var lastNs = System.nanoTime()
             while (isSongPlaying.value) {
-                val timeline = playbackBaseTimelineMs +
-                    (System.nanoTime() - playbackBaseNs) / 1_000_000
+                val now = System.nanoTime()
+                clockPositionMs += (now - lastNs) / 1_000_000.0 * playbackRate.value
+                lastNs = now
                 val timelineDuration = timelineDurationMs()
-                if (timelineDuration > 0 && timeline >= timelineDuration) {
-                    playbackBaseTimelineMs = 0L
-                    playbackBaseNs = System.nanoTime()
-                    playbackPositionMs.value = 0L
+                if (timelineDuration > 0 && clockPositionMs >= timelineDuration) {
+                    setTimelinePosition(0L)
                     syncPlayerToTimeline(0L)
-                    restartMetronomeBase()
+                    scheduleMetronomeStreams()
                 } else {
-                    playbackPositionMs.value = timeline.coerceAtLeast(0)
-                    syncPlayerToTimeline(timeline)
+                    playbackPositionMs.value = clockPositionMs.toLong().coerceAtLeast(0L)
+                    syncPlayerToTimeline(playbackPositionMs.value)
                 }
                 delay(16)
             }
@@ -562,6 +613,11 @@ class PresetsViewModel(
         }
     }
 
+    private fun setTimelinePosition(positionMs: Long) {
+        playbackPositionMs.value = positionMs
+        clockPositionMs = positionMs.toDouble()
+    }
+
     fun stopSongPlayback() {
         releaseSongPlayer()
     }
@@ -573,7 +629,7 @@ class PresetsViewModel(
         stopEditorMetronome()
         songPlayer?.let { try { it.stop(); it.release() } catch (_: Exception) {} }
         songPlayer = null
-        playbackPositionMs.value = 0L
+        setTimelinePosition(0L)
     }
 
     fun onScrubStart() {
@@ -590,19 +646,96 @@ class PresetsViewModel(
     fun onScrub(positionMs: Long) {
         val timelineDuration = timelineDurationMs()
         val pos = positionMs.coerceIn(0L, timelineDuration)
-        playbackPositionMs.value = pos
+        setTimelinePosition(pos)
         songPlayer?.seekTo((pos - songOffsetMs.value).coerceAtLeast(0L))
     }
 
     fun seekTo(positionMs: Long) {
         val timelineDuration = timelineDurationMs()
         val pos = positionMs.coerceIn(0L, timelineDuration)
-        playbackPositionMs.value = pos
+        setTimelinePosition(pos)
         songPlayer?.seekTo((pos - songOffsetMs.value).coerceAtLeast(0L))
         if (isSongPlaying.value) {
-            playbackBaseTimelineMs = pos
-            playbackBaseNs = System.nanoTime()
-            resetMetronomeBase(pos)
+            scheduleMetronomeStreams()
+        }
+    }
+
+    // -- Song settings (pitch / speed) --
+
+    fun setSongSpeed(rate: Float) {
+        val clamped = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        if (playbackRate.value == clamped) return
+        playbackRate.value = clamped
+        applySongParameters()
+        updateActiveStreamBpms()
+        scheduleSongSettingsPersist()
+    }
+
+    fun setSongPitch(semitones: Int) {
+        val clamped = semitones.coerceIn(-MAX_PITCH_SEMITONES, MAX_PITCH_SEMITONES)
+        if (pitchOffsetSemitones.value == clamped) return
+        pitchOffsetSemitones.value = clamped
+        applySongParameters()
+        scheduleSongSettingsPersist()
+    }
+
+    fun setPitchFollowsSpeed(enabled: Boolean) {
+        if (pitchFollowsSpeed.value == enabled) return
+        pitchFollowsSpeed.value = enabled
+        applySongParameters()
+        scheduleSongSettingsPersist()
+    }
+
+    private fun pitchFactor(): Float {
+        val semitoneFactor = 2.0.pow(pitchOffsetSemitones.value / 12.0).toFloat()
+        return if (pitchFollowsSpeed.value) semitoneFactor * playbackRate.value else semitoneFactor
+    }
+
+    private fun currentPlaybackParameters(): PlaybackParameters =
+        PlaybackParameters(playbackRate.value, pitchFactor())
+
+    private fun applySongParameters() {
+        val player = songPlayer ?: return
+        val params = currentPlaybackParameters()
+        if (player.playbackParameters != params) {
+            player.playbackParameters = params
+        }
+    }
+
+    private fun updateActiveStreamBpms() {
+        if (activeStreamIds.isEmpty()) return
+        val rate = playbackRate.value
+        for (layer in layers.value) {
+            for (region in layer.regions) {
+                val streamId = region.id.toInt()
+                if (streamId in activeStreamIds) {
+                    metronomeEngine.updateLayer(
+                        MetronomeLayerConfig(
+                            id = streamId,
+                            bpm = region.bpm.toFloat() * rate,
+                            timeSigNum = region.timeSignatureNum,
+                            timeSigDenom = region.timeSignatureDenom,
+                            volume = region.volume,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun scheduleSongSettingsPersist() {
+        persistSettingsJob?.cancel()
+        persistSettingsJob = viewModelScope.launch {
+            delay(400)
+            val preset = editingPreset.value ?: return@launch
+            presetRepository.update(
+                preset.copy(
+                    playbackRate = playbackRate.value,
+                    pitchOffsetSemitones = pitchOffsetSemitones.value,
+                    pitchFollowsSpeed = pitchFollowsSpeed.value,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
         }
     }
 
@@ -621,14 +754,6 @@ class PresetsViewModel(
             metronomeInitialized = metronomeEngine.initialize()
         }
         metronomeEngine.start()
-        resetMetronomeBase(playbackPositionMs.value)
-    }
-
-    private fun restartMetronomeBase() = resetMetronomeBase(0L)
-
-    private fun resetMetronomeBase(positionMs: Long) {
-        metronomeBaseNs = System.nanoTime()
-        metronomeBaseTimelineMs = positionMs
         scheduleMetronomeStreams()
     }
 
@@ -666,7 +791,7 @@ class PresetsViewModel(
         metronomeEngine.addLayer(
             MetronomeLayerConfig(
                 id = streamId,
-                bpm = region.bpm.toFloat(),
+                bpm = region.bpm.toFloat() * playbackRate.value,
                 timeSigNum = region.timeSignatureNum,
                 timeSigDenom = region.timeSignatureDenom,
                 volume = region.volume,
@@ -683,12 +808,11 @@ class PresetsViewModel(
         while (true) {
             val remaining = targetMs - currentMetronomeTimeline()
             if (remaining <= 0) return true
-            delay(remaining.coerceAtMost(100))
+            delay(remaining.coerceAtMost(16))
         }
     }
 
-    private fun currentMetronomeTimeline(): Long =
-        metronomeBaseTimelineMs + (System.nanoTime() - metronomeBaseNs) / 1_000_000
+    private fun currentMetronomeTimeline(): Long = playbackPositionMs.value
 
     fun onTapTempo(region: MetronomeRegion) {
         val now = System.currentTimeMillis()
@@ -722,6 +846,7 @@ class PresetsViewModel(
         stopSongPlayback()
         layersObservingJob?.cancel()
         playbackClockJob?.cancel()
+        persistSettingsJob?.cancel()
         metronomeJobs.forEach { it.cancel() }
         super.onCleared()
     }

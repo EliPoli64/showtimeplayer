@@ -25,6 +25,7 @@ data class PresetEntity(
     val name: String,
     val playbackRate: Float = 1.0f,
     val pitchOffsetSemitones: Int = 0,
+    val pitchFollowsSpeed: Boolean = false,
     val loopStartMs: Long? = null,
     val loopEndMs: Long? = null,
     val songOffsetMs: Long = 0L,

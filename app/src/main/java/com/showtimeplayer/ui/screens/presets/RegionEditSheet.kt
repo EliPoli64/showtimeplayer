@@ -51,6 +51,7 @@ fun RegionEditSheet(
     onCountInBarsChanged: (Int) -> Unit,
     onVolumeChanged: (Float) -> Unit,
     onTapTempo: () -> Unit,
+    onReset: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState()
@@ -61,8 +62,14 @@ fun RegionEditSheet(
     var countInBars by remember(region.id) { mutableIntStateOf(region.countInBars) }
     var volume by remember(region.id) { mutableFloatStateOf(region.volume) }
 
-    // Keep the field in sync when the tempo changes from tap-tempo.
+    // Keep the fields in sync when the region changes from tap-tempo or Reset.
     LaunchedEffect(region.bpm) { bpmText = region.bpm }
+    LaunchedEffect(region.timeSignatureNum, region.timeSignatureDenom) {
+        timeSigNum = region.timeSignatureNum
+        timeSigDenom = region.timeSignatureDenom
+    }
+    LaunchedEffect(region.countInBars) { countInBars = region.countInBars }
+    LaunchedEffect(region.volume) { volume = region.volume }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -193,20 +200,29 @@ fun RegionEditSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Delete
-            TextButton(
-                onClick = {
-                    scope.launch {
-                        sheetState.hide()
-                        onDismiss()
-                        onDelete()
-                    }
-                },
-                colors = ButtonDefaults.textButtonColors(
-                    contentColor = MaterialTheme.colorScheme.error,
-                ),
+            // Reset / Delete
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Delete Region")
+                TextButton(onClick = onReset) {
+                    Text("Reset")
+                }
+                TextButton(
+                    onClick = {
+                        scope.launch {
+                            sheetState.hide()
+                            onDismiss()
+                            onDelete()
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) {
+                    Text("Delete Region")
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))

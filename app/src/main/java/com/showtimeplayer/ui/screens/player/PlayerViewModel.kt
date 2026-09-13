@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import kotlin.math.pow
 
 data class PlayerUiState(
     val currentTrack: TrackEntity? = null,
@@ -61,6 +63,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var pauseAccumulatedNs: Long = 0L
     private var lastResumeNs: Long = 0L
     private var metronomeActiveStreams = mutableSetOf<Int>()
+    private var activePlaybackRate: Float = 1.0f
 
     init {
         val sessionToken = SessionToken(
@@ -96,6 +99,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         val enabledLayers = presetWithLayers.layers.filter { it.layer.enabled && it.regions.isNotEmpty() }
         val songOffsetMs = presetWithLayers.preset.songOffsetMs.coerceAtLeast(0L)
+
+        val preset = presetWithLayers.preset
+        activePlaybackRate = preset.playbackRate.coerceIn(0.25f, 2.0f)
+        val semitoneFactor = 2.0.pow(preset.pitchOffsetSemitones / 12.0).toFloat()
+        val pitch = if (preset.pitchFollowsSpeed) {
+            semitoneFactor * activePlaybackRate
+        } else {
+            semitoneFactor
+        }
+        mediaController.setPlaybackParameters(
+            PlaybackParameters(activePlaybackRate, pitch),
+        )
 
         queueTracks.clear()
         queueTracks.add(track)
@@ -177,7 +192,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val streamId = region.id.toInt()
         val config = MetronomeLayerConfig(
             id = streamId,
-            bpm = region.bpm.toFloat(),
+            bpm = region.bpm.toFloat() * activePlaybackRate,
             timeSigNum = region.timeSignatureNum,
             timeSigDenom = region.timeSignatureDenom,
             volume = region.volume,
@@ -193,7 +208,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun elapsedMsSinceStart(): Long {
         if (songStartTimeNs <= 0) return 0
         val elapsedNs = System.nanoTime() - songStartTimeNs - pauseAccumulatedNs
-        return (elapsedNs / 1_000_000).coerceAtLeast(0)
+        return (elapsedNs / 1_000_000.0 * activePlaybackRate).toLong().coerceAtLeast(0)
     }
 
     private suspend fun preciseDelay(targetMs: Long) {
@@ -249,6 +264,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         isCountInActive = false
         isPaused = false
         pauseAccumulatedNs = 0L
+        activePlaybackRate = 1.0f
+        mediaController.setPlaybackParameters(PlaybackParameters(1.0f, 1.0f))
 
         val mediaItems = tracks.map { trackToMediaItem(it) }
 

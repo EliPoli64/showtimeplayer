@@ -100,6 +100,7 @@ private fun DawEditor(
 ) {
     var trackSearchQuery by remember { mutableStateOf("") }
     var showLayerManager by remember { mutableStateOf(false) }
+    var showSongSettings by remember { mutableStateOf(false) }
     val targetLayerId = uiState.layers.firstOrNull { it.layer.enabled }?.layer?.id
         ?: uiState.layers.firstOrNull()?.layer?.id
 
@@ -204,6 +205,11 @@ private fun DawEditor(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
+
+                    SongSettingsBadge(
+                        settingsFlow = viewModel.songSettingsState,
+                        onClick = { showSongSettings = true },
+                    )
                 }
 
                 // DAW Timeline
@@ -291,6 +297,7 @@ private fun DawEditor(
             onCountInBarsChanged = { bars -> viewModel.updateRegion(region.copy(countInBars = bars)) },
             onVolumeChanged = { vol -> viewModel.updateRegion(region.copy(volume = vol)) },
             onTapTempo = { viewModel.onTapTempo(region) },
+            onReset = { viewModel.resetRegion(region.id) },
             onDelete = { viewModel.removeRegion(region.id) },
         )
     }
@@ -302,6 +309,16 @@ private fun DawEditor(
             onAddLayer = viewModel::addLayer,
             onToggleLayer = viewModel::toggleLayerEnabled,
             onRemoveLayer = viewModel::removeLayer,
+        )
+    }
+
+    if (showSongSettings) {
+        SongSettingsSheet(
+            settingsFlow = viewModel.songSettingsState,
+            onSpeedChanged = viewModel::setSongSpeed,
+            onPitchChanged = viewModel::setSongPitch,
+            onPitchFollowsSpeedChanged = viewModel::setPitchFollowsSpeed,
+            onDismiss = { showSongSettings = false },
         )
     }
 }
