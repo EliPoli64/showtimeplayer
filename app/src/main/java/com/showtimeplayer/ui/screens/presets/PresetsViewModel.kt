@@ -16,7 +16,6 @@ import com.showtimeplayer.data.db.entity.TrackEntity
 import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetRepositoryImpl
 import com.showtimeplayer.data.repository.TrackRepositoryImpl
-import com.showtimeplayer.player.metronome.MetronomeLayerConfig
 import com.showtimeplayer.util.AudioDecoder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -48,6 +47,10 @@ const val DEFAULT_TIME_SIG_NUM = 4
 const val DEFAULT_TIME_SIG_DENOM = 4
 const val DEFAULT_COUNT_IN_BARS = 2
 const val DEFAULT_VOLUME = 1.0f
+const val MAX_VOLUME = 2.0f
+
+// Upper bound for output-latency click compensation; guards against absurd stream readings.
+const val MAX_CLICK_LEAD_MS = 500L
 
 data class SongSettingsState(
     val playbackRate: Float = 1.0f,
@@ -407,17 +410,17 @@ class PresetsViewModel(
                 selectedRegion.value = region
             }
         }
-        val streamId = region.id.toInt()
-        if (streamId in activeStreamIds) {
-            metronomeEngine.updateLayer(
-                MetronomeLayerConfig(
-                    id = streamId,
-                    bpm = region.bpm.toFloat() * playbackRate.value,
-                    timeSigNum = region.timeSignatureNum,
-                    timeSigDenom = region.timeSignatureDenom,
-                    volume = region.volume,
-                ),
-            )
+        // A clip is pre-rendered from the region's settings, so a live edit re-renders it.
+        scheduleClipReRender()
+    }
+
+    private var clipReRenderJob: Job? = null
+    private fun scheduleClipReRender() {
+        if (!isSongPlaying.value) return
+        clipReRenderJob?.cancel()
+        clipReRenderJob = viewModelScope.launch {
+            delay(150)
+            scheduleMetronomeStreams()
         }
     }
 
@@ -562,7 +565,9 @@ class PresetsViewModel(
         playbackClockJob?.cancel()
         playbackClockJob = null
         songPlayer?.pause()
-        stopEditorMetronome()
+        // Keep the native stream warm while the editor is open so resuming (and the next
+        // count-in, especially over Bluetooth) starts smoothly. It is stopped on editor exit.
+        clearEditorStreams()
     }
 
     private fun initSongPlayer() {
@@ -574,6 +579,13 @@ class PresetsViewModel(
         player.repeatMode = Player.REPEAT_MODE_OFF
         player.playbackParameters = currentPlaybackParameters()
         player.prepare()
+
+        // Pre-open the metronome stream so it is already routed and warmed up by the time the
+        // first click plays (Bluetooth streams take noticeably longer to spin up).
+        if (!metronomeInitialized) {
+            metronomeInitialized = metronomeEngine.initialize()
+        }
+        metronomeEngine.start()
     }
 
     private fun startPlaybackClock() {
@@ -639,7 +651,7 @@ class PresetsViewModel(
             playbackClockJob?.cancel()
             playbackClockJob = null
             songPlayer?.pause()
-            stopEditorMetronome()
+            clearEditorStreams()
         }
     }
 
@@ -667,7 +679,8 @@ class PresetsViewModel(
         if (playbackRate.value == clamped) return
         playbackRate.value = clamped
         applySongParameters()
-        updateActiveStreamBpms()
+        // Clips are pre-rendered with the rate baked in, so re-render them at the new speed.
+        scheduleClipReRender()
         scheduleSongSettingsPersist()
     }
 
@@ -699,27 +712,6 @@ class PresetsViewModel(
         val params = currentPlaybackParameters()
         if (player.playbackParameters != params) {
             player.playbackParameters = params
-        }
-    }
-
-    private fun updateActiveStreamBpms() {
-        if (activeStreamIds.isEmpty()) return
-        val rate = playbackRate.value
-        for (layer in layers.value) {
-            for (region in layer.regions) {
-                val streamId = region.id.toInt()
-                if (streamId in activeStreamIds) {
-                    metronomeEngine.updateLayer(
-                        MetronomeLayerConfig(
-                            id = streamId,
-                            bpm = region.bpm.toFloat() * rate,
-                            timeSigNum = region.timeSignatureNum,
-                            timeSigDenom = region.timeSignatureDenom,
-                            volume = region.volume,
-                        ),
-                    )
-                }
-            }
         }
     }
 
@@ -758,61 +750,64 @@ class PresetsViewModel(
     }
 
     private fun stopEditorMetronome() {
-        metronomeJobs.forEach { it.cancel() }
-        metronomeJobs.clear()
-        for (id in activeStreamIds.toList()) {
-            metronomeEngine.removeLayer(id)
-        }
-        activeStreamIds.clear()
+        clearEditorStreams()
         metronomeEngine.stop()
     }
 
+    // Cancels scheduled count-ins and removes active clicks, but leaves the native output
+    // stream running so it stays warm (important for smooth Bluetooth playback).
+    private fun clearEditorStreams() {
+        metronomeJobs.forEach { it.cancel() }
+        metronomeJobs.clear()
+        for (id in activeStreamIds.toList()) {
+            metronomeEngine.removeClip(id)
+        }
+        activeStreamIds.clear()
+    }
+
+    // Pre-renders every enabled count-in region into a PCM clip and schedules playback via the
+    // engine's sample counter. Nothing is synthesized on the audio thread at runtime.
     private fun scheduleMetronomeStreams() {
         metronomeJobs.forEach { it.cancel() }
         metronomeJobs.clear()
+        for (id in activeStreamIds.toList()) {
+            metronomeEngine.removeClip(id)
+        }
+        activeStreamIds.clear()
+
+        val sr = metronomeEngine.sampleRate().takeIf { it > 0 } ?: 44100
+        val rate = playbackRate.value
+        val sampleBase = metronomeEngine.sampleCount()
+        val timelineBase = playbackPositionMs.value
+        val leadMs = metronomeEngine.latencyMs().toLong().coerceIn(0L, MAX_CLICK_LEAD_MS)
+
         val enabledLayers = layers.value.filter { it.layer.enabled }
         for (layer in enabledLayers) {
             for (region in layer.regions) {
-                metronomeJobs.add(viewModelScope.launch { runCountInStream(region) })
+                if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) continue
+                val beatMs = 60_000.0 / region.bpm
+                val countInDurationMs = region.countInBars * beatMs * region.timeSignatureNum
+                val startTimeline = region.startMs - countInDurationMs.toLong() - leadMs
+                // Engine sample counter for a future media-time position, at current rate.
+                val futureWallMs = (startTimeline - timelineBase) / rate
+                val startSample = sampleBase + (futureWallMs * sr / 1000.0).toLong()
+
+                val clip = metronomeEngine.renderCountInClip(
+                    sampleRate = sr,
+                    playbackRate = rate,
+                    bpm = region.bpm,
+                    timeSigNum = region.timeSignatureNum,
+                    countInBars = region.countInBars,
+                    volume = region.volume,
+                )
+                if (clip.isNotEmpty()) {
+                    val id = region.id.toInt()
+                    metronomeEngine.addClip(id, clip, startSample, 1.0f)
+                    activeStreamIds.add(id)
+                }
             }
         }
     }
-
-    private suspend fun runCountInStream(region: MetronomeRegion) {
-        if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) return
-        val beatMs = 60_000L / region.bpm
-        val countInDurationMs = region.countInBars * beatMs * region.timeSignatureNum
-        val countInStartMs = region.startMs - countInDurationMs
-        val countInEndMs = region.startMs
-        if (countInEndMs <= currentMetronomeTimeline()) return
-        if (!waitUntilMetronomeTime(countInStartMs)) return
-
-        val streamId = region.id.toInt()
-        metronomeEngine.addLayer(
-            MetronomeLayerConfig(
-                id = streamId,
-                bpm = region.bpm.toFloat() * playbackRate.value,
-                timeSigNum = region.timeSignatureNum,
-                timeSigDenom = region.timeSignatureDenom,
-                volume = region.volume,
-            ),
-        )
-        activeStreamIds.add(streamId)
-
-        waitUntilMetronomeTime(countInEndMs)
-        metronomeEngine.removeLayer(streamId)
-        activeStreamIds.remove(streamId)
-    }
-
-    private suspend fun waitUntilMetronomeTime(targetMs: Long): Boolean {
-        while (true) {
-            val remaining = targetMs - currentMetronomeTimeline()
-            if (remaining <= 0) return true
-            delay(remaining.coerceAtMost(16))
-        }
-    }
-
-    private fun currentMetronomeTimeline(): Long = playbackPositionMs.value
 
     fun onTapTempo(region: MetronomeRegion) {
         val now = System.currentTimeMillis()
@@ -847,6 +842,7 @@ class PresetsViewModel(
         layersObservingJob?.cancel()
         playbackClockJob?.cancel()
         persistSettingsJob?.cancel()
+        clipReRenderJob?.cancel()
         metronomeJobs.forEach { it.cancel() }
         super.onCleared()
     }

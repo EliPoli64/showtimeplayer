@@ -191,7 +191,7 @@ fun RegionEditSheet(
                     volume = it
                     onVolumeChanged(it)
                 },
-                valueRange = 0f..1f,
+                valueRange = 0f..MAX_VOLUME,
                 colors = SliderDefaults.colors(
                     thumbColor = MaterialTheme.colorScheme.primary,
                     activeTrackColor = MaterialTheme.colorScheme.primary,

@@ -1,12 +1,13 @@
 #include <jni.h>
+#include <atomic>
+#include <mutex>
 #include <oboe/Oboe.h>
 #include "MetronomeSynthesizer.h"
 
-class AudioEngine : public oboe::AudioStreamDataCallback {
+class AudioEngine : public oboe::AudioStreamCallback {
 public:
     oboe::ManagedStream stream;
     MetronomeSynthesizer synth;
-    bool isStarted = false;
 
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* oboeStream,
@@ -19,24 +20,77 @@ public:
         return oboe::DataCallbackResult::Continue;
     }
 
+    // Called by Oboe after the stream is closed due to an error/device change (e.g. a
+    // Bluetooth route change). Reopen so the click keeps following the current output
+    // route instead of going silent or glitching.
+    void onErrorAfterClose(oboe::AudioStream* /* audioStream */, oboe::Result /* error */) override {
+        if (!shouldRun.load()) return;
+        isStarted = false;
+        reopen();
+    }
+
+    // Public entry point (from JNI). Marks the engine as wanting to run, then (re)opens.
     int start() {
-        if (isStarted) return 0;
+        shouldRun = true;
+        return reopen();
+    }
+
+    void stop() {
+        shouldRun = false;
+        isStarted = false;
+        if (stream) {
+            stream->requestStop();
+        }
+    }
+
+    // Round-trip output latency of the metronome stream, in milliseconds. Used by the app to
+    // start count-ins early so the clicks are heard at the intended timeline position.
+    float latencyMs() {
+        if (!stream) return 0.0f;
+        oboe::ResultWithValue<double> result = stream->calculateLatencyMillis();
+        if (result.error() == oboe::Result::OK) {
+            return static_cast<float>(result.value());
+        }
+        return 0.0f;
+    }
+
+private:
+    int reopen() {
+        std::lock_guard<std::mutex> lock(restartMutex);
+        // A stop() may have raced with a device-change callback; don't resurrect it.
+        if (!shouldRun.load() || isStarted) return 0;
 
         oboe::AudioStreamBuilder builder;
         builder.setDirection(oboe::Direction::Output)
-               ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+               // Normal mixer (not LowLatency): the low-latency/fast MMAP path does not mix
+               // reliably alongside ExoPlayer's track, whereas the shared normal mixer does.
+               // A metronome click does not need low latency.
+               ->setPerformanceMode(oboe::PerformanceMode::None)
                ->setSharingMode(oboe::SharingMode::Shared)
                ->setFormat(oboe::AudioFormat::Float)
                ->setChannelCount(oboe::ChannelCount::Stereo)
-               ->setSampleRate(MetronomeSynthesizer::SAMPLE_RATE)
-               ->setDataCallback(this);
+               // No fixed sample rate: let the device pick (Bluetooth usually runs at
+               // 48 kHz, not 44.1 kHz) and keep the synth in sync with the actual rate.
+               ->setSampleRate(oboe::Unspecified)
+               ->setCallback(this);
 
         oboe::Result result = builder.openManagedStream(stream);
         if (result != oboe::Result::OK) {
             return static_cast<int>(result);
         }
 
-        stream->setBufferSizeInFrames(stream->getFramesPerBurst() * 2);
+        // Match the synth to the actual output rate so tempo/pitch stay correct.
+        synth.setSampleRate(stream->getSampleRate());
+
+        // A deeper buffer rides out Bluetooth scheduling jitter, which otherwise shows up as
+        // chopped/uneven clicks on the normal (non-low-latency) mixer path.
+        int32_t capacity = stream->getBufferCapacityInFrames();
+        int32_t desired = stream->getFramesPerBurst() * 2;
+        int32_t minMs = stream->getSampleRate() / 50; // ~20 ms
+        if (desired < minMs) desired = minMs;
+        if (capacity > 0 && desired > capacity) desired = capacity;
+        stream->setBufferSizeInFrames(desired);
+
         result = stream->requestStart();
         if (result != oboe::Result::OK) {
             return static_cast<int>(result);
@@ -46,12 +100,9 @@ public:
         return 0;
     }
 
-    void stop() {
-        if (stream) {
-            stream->requestStop();
-        }
-        isStarted = false;
-    }
+    std::atomic<bool> isStarted{false};
+    std::atomic<bool> shouldRun{false};
+    std::mutex restartMutex;
 };
 
 static AudioEngine* g_engine = nullptr;
@@ -90,6 +141,15 @@ Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeStop(
     if (g_engine) {
         g_engine->stop();
     }
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeGetLatencyMs(
+    JNIEnv* /* env */,
+    jobject /* thiz */
+) {
+    if (!g_engine) return 0.0f;
+    return g_engine->latencyMs();
 }
 
 JNIEXPORT void JNICALL
@@ -161,6 +221,55 @@ Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeTriggerAll(
 ) {
     if (!g_engine) return;
     g_engine->synth.triggerAll();
+}
+
+JNIEXPORT void JNICALL
+Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeAddClip(
+    JNIEnv* env,
+    jobject /* thiz */,
+    jint id,
+    jfloatArray data,
+    jlong startSample,
+    jfloat volume
+) {
+    if (!g_engine) return;
+    jsize len = env->GetArrayLength(data);
+    if (len <= 0) return;
+    jfloat* ptr = env->GetFloatArrayElements(data, nullptr);
+    if (!ptr) return;
+    g_engine->synth.addClip(
+        static_cast<int>(id), ptr, static_cast<int>(len),
+        static_cast<int64_t>(startSample), static_cast<float>(volume)
+    );
+    env->ReleaseFloatArrayElements(data, ptr, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL
+Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeRemoveClip(
+    JNIEnv* /* env */,
+    jobject /* thiz */,
+    jint id
+) {
+    if (!g_engine) return;
+    g_engine->synth.removeClip(static_cast<int>(id));
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeGetSampleCount(
+    JNIEnv* /* env */,
+    jobject /* thiz */
+) {
+    if (!g_engine) return 0;
+    return static_cast<jlong>(g_engine->synth.getSampleCount());
+}
+
+JNIEXPORT jint JNICALL
+Java_com_showtimeplayer_player_engine_NativeOboeEngine_nativeGetSampleRate(
+    JNIEnv* /* env */,
+    jobject /* thiz */
+) {
+    if (!g_engine) return 0;
+    return static_cast<jint>(g_engine->synth.getSampleRate());
 }
 
 } // extern "C"

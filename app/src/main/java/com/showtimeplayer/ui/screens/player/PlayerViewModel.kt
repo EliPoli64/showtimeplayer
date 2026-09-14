@@ -16,8 +16,8 @@ import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.TrackEntity
 import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetWithLayers
-import com.showtimeplayer.player.metronome.MetronomeLayerConfig
 import com.showtimeplayer.player.service.PlaybackService
+import com.showtimeplayer.ui.screens.presets.MAX_CLICK_LEAD_MS
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -181,28 +181,30 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         if (region.bpm <= 0 || region.countInBars <= 0 || region.timeSignatureNum <= 0) return
 
-        val beatIntervalMs = 60_000L / region.bpm
-        val countInDurationMs = region.countInBars * beatIntervalMs * region.timeSignatureNum
-        val countInStartMs = (region.startMs - countInDurationMs).coerceAtLeast(0L)
-        val countInEndMs = region.startMs
+        val beatIntervalMs = 60_000.0 / region.bpm
+        val countInDurationMs = (region.countInBars * beatIntervalMs * region.timeSignatureNum).toLong()
+        // Start early by the stream's output latency so the clicks are *heard* on the beat
+        // (matters most on Bluetooth).
+        val leadMs = metronomeEngine.latencyMs().toLong().coerceIn(0L, MAX_CLICK_LEAD_MS)
+        val countInStartMs = (region.startMs - countInDurationMs - leadMs).coerceAtLeast(0L)
 
         preciseDelay(countInStartMs)
-        if (countInEndMs <= elapsedMsSinceStart()) return
 
-        val streamId = region.id.toInt()
-        val config = MetronomeLayerConfig(
-            id = streamId,
-            bpm = region.bpm.toFloat() * activePlaybackRate,
+        val sr = metronomeEngine.sampleRate().takeIf { it > 0 } ?: 44100
+        val clip = metronomeEngine.renderCountInClip(
+            sampleRate = sr,
+            playbackRate = activePlaybackRate,
+            bpm = region.bpm,
             timeSigNum = region.timeSignatureNum,
-            timeSigDenom = region.timeSignatureDenom,
+            countInBars = region.countInBars,
             volume = region.volume,
         )
-        metronomeEngine.addLayer(config)
-        metronomeActiveStreams.add(streamId)
-
-        preciseDelay(countInEndMs)
-        metronomeEngine.removeLayer(streamId)
-        metronomeActiveStreams.remove(streamId)
+        if (clip.isNotEmpty()) {
+            val id = region.id.toInt()
+            // Starts immediately; the clip is pre-rendered to span exactly the count-in.
+            metronomeEngine.addClip(id, clip, metronomeEngine.sampleCount(), 1.0f)
+            metronomeActiveStreams.add(id)
+        }
     }
 
     private fun elapsedMsSinceStart(): Long {
@@ -229,8 +231,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         countInJob = null
         metronomeJobs.forEach { it.cancel() }
         metronomeJobs.clear()
-        for (streamId in metronomeActiveStreams) {
-            metronomeEngine.removeLayer(streamId)
+        for (id in metronomeActiveStreams) {
+            metronomeEngine.removeClip(id)
         }
         metronomeActiveStreams.clear()
         metronomeEngine.stop()
