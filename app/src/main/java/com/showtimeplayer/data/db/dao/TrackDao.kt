@@ -20,6 +20,9 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE id = :id")
     suspend fun getById(id: Long): TrackEntity?
 
+    @Query("SELECT * FROM tracks WHERE uri = :uri")
+    suspend fun getByUri(uri: String): TrackEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(track: TrackEntity): Long
 
@@ -28,6 +31,9 @@ interface TrackDao {
 
     @Update
     suspend fun update(track: TrackEntity)
+
+    @Update
+    suspend fun updateAll(tracks: List<TrackEntity>)
 
     @Delete
     suspend fun delete(track: TrackEntity)

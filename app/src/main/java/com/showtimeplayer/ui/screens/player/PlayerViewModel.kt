@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.pow
+import kotlin.math.roundToInt
 
 data class PlayerUiState(
     val currentTrack: TrackEntity? = null,
@@ -42,6 +43,8 @@ data class PlayerUiState(
     val currentQueueIndex: Int = -1,
     val isCountInActive: Boolean = false,
     val beat1Ms: Long = 0L,
+    val presetName: String? = null,
+    val presetSummary: String? = null,
 )
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
@@ -64,6 +67,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var lastResumeNs: Long = 0L
     private var metronomeActiveStreams = mutableSetOf<Int>()
     private var activePlaybackRate: Float = 1.0f
+    private var activePresetTrack: TrackEntity? = null
+    private var activePreset: PresetWithLayers? = null
+    private var activeEnabledLayers: List<MetronomeLayerWithRegions> = emptyList()
+    // Media position at which the current count-in sequence began, so seeking re-syncs
+    // the metronome ("load on beat") instead of losing it.
+    private var seekBaseMs = 0L
 
     init {
         val sessionToken = SessionToken(
@@ -86,6 +95,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playTrack(track: TrackEntity) {
+        activePreset = null
+        activePresetTrack = null
         playTrackAsQueue(listOf(track), 0)
     }
 
@@ -101,6 +112,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         val songOffsetMs = presetWithLayers.preset.songOffsetMs.coerceAtLeast(0L)
 
         val preset = presetWithLayers.preset
+        activeEnabledLayers = enabledLayers
+        seekBaseMs = 0L
+        activePresetTrack = track
+        activePreset = presetWithLayers
         activePlaybackRate = preset.playbackRate.coerceIn(0.25f, 2.0f)
         val semitoneFactor = 2.0.pow(preset.pitchOffsetSemitones / 12.0).toFloat()
         val pitch = if (preset.pitchFollowsSpeed) {
@@ -112,6 +127,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             PlaybackParameters(activePlaybackRate, pitch),
         )
 
+        // Stop any current playback and clear the queue so the preset plays on its own.
+        mediaController.stop()
         queueTracks.clear()
         queueTracks.add(track)
         _uiState.update {
@@ -121,6 +138,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 queue = listOf(track),
                 currentQueueIndex = 0,
                 isCountInActive = false,
+                presetName = preset.name,
+                presetSummary = presetSummary(preset),
             )
         }
         mediaController.setMediaItems(listOf(trackToMediaItem(track)), 0, 0L)
@@ -133,45 +152,50 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         countInJob = viewModelScope.launch {
             awaitReady()
+            startCountInScheduling()
 
-            songStartTimeNs = System.nanoTime()
-            lastResumeNs = songStartTimeNs
-            isCountInActive = enabledLayers.isNotEmpty()
-            _uiState.update { it.copy(isCountInActive = isCountInActive) }
-
-            metronomeEngine.start()
-
-            var earliestBeat1Ms = Long.MAX_VALUE
-
-            for (layerWithRegions in enabledLayers) {
-                for (region in layerWithRegions.regions) {
-                    val job = launch { scheduleRegion(layerWithRegions, region) }
-                    metronomeJobs.add(job)
-
-                    if (region.countInBars > 0 && region.bpm > 0) {
-                        val beatIntervalMs = 60_000L / region.bpm
-                        val beat1Ms = region.startMs
-                        if (beat1Ms < earliestBeat1Ms) {
-                            earliestBeat1Ms = beat1Ms
-                        }
-                    }
-                }
-            }
-
-            if (earliestBeat1Ms == Long.MAX_VALUE) {
-                isCountInActive = false
-                _uiState.update { it.copy(isCountInActive = false) }
-            } else {
-                _uiState.update { it.copy(beat1Ms = earliestBeat1Ms) }
-            }
-
-            // The song audio starts after the preset's timeline offset (lead-in silence).
-            if (songOffsetMs > 0) {
-                preciseDelay(songOffsetMs)
+            // Start the song audio after any leading count-in, so the sequence plays
+            // count-in first, then the track (not the track overlapping the count-in).
+            val leadingDownbeat = activeEnabledLayers.flatMap { it.regions }
+                .filter { it.countInBars > 0 && it.bpm > 0 }
+                .minOfOrNull { it.startMs }
+                ?: 0L
+            val effectiveSongStart = maxOf(songOffsetMs, leadingDownbeat)
+            if (effectiveSongStart > 0) {
+                preciseDelay(effectiveSongStart)
             }
             if (!isPaused) {
                 mediaController.play()
             }
+        }
+    }
+
+    // Anchors the count-in/click scheduling at the current media position (`seekBaseMs`)
+    // and fires the pre-rendered clips for regions ahead of it.
+    private fun startCountInScheduling() {
+        songStartTimeNs = System.nanoTime()
+        lastResumeNs = songStartTimeNs
+        isCountInActive = activeEnabledLayers.isNotEmpty()
+        _uiState.update { it.copy(isCountInActive = isCountInActive) }
+
+        metronomeEngine.start()
+
+        var earliestBeat1Ms = Long.MAX_VALUE
+        for (layerWithRegions in activeEnabledLayers) {
+            for (region in layerWithRegions.regions) {
+                val job = viewModelScope.launch { scheduleRegion(layerWithRegions, region) }
+                metronomeJobs.add(job)
+                if (region.countInBars > 0 && region.bpm > 0 && region.startMs < earliestBeat1Ms) {
+                    earliestBeat1Ms = region.startMs
+                }
+            }
+        }
+
+        if (earliestBeat1Ms == Long.MAX_VALUE) {
+            isCountInActive = false
+            _uiState.update { it.copy(isCountInActive = false) }
+        } else {
+            _uiState.update { it.copy(beat1Ms = earliestBeat1Ms) }
         }
     }
 
@@ -186,7 +210,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         // Start early by the stream's output latency so the clicks are *heard* on the beat
         // (matters most on Bluetooth).
         val leadMs = metronomeEngine.latencyMs().toLong().coerceIn(0L, MAX_CLICK_LEAD_MS)
-        val countInStartMs = (region.startMs - countInDurationMs - leadMs).coerceAtLeast(0L)
+        // Schedule relative to the position we started from, so count-ins re-sync on seek.
+        val countInStartMs = (region.startMs - seekBaseMs - countInDurationMs - leadMs)
+            .coerceAtLeast(0L)
 
         preciseDelay(countInStartMs)
 
@@ -229,6 +255,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun cancelMetronome() {
         countInJob?.cancel()
         countInJob = null
+        isCountInActive = false
         metronomeJobs.forEach { it.cancel() }
         metronomeJobs.clear()
         for (id in metronomeActiveStreams) {
@@ -262,6 +289,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun playTrackAsQueue(tracks: List<TrackEntity>, startIndex: Int) {
         if (!::mediaController.isInitialized || tracks.isEmpty()) return
 
+        activePreset = null
+        activePresetTrack = null
         cancelMetronome()
         isCountInActive = false
         isPaused = false
@@ -281,6 +310,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 queue = tracks.toList(),
                 currentQueueIndex = startIndex,
                 isCountInActive = false,
+                presetName = null,
+                presetSummary = null,
             )
         }
 
@@ -326,6 +357,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun clearQueue() {
         if (!::mediaController.isInitialized) return
         cancelMetronome()
+        activePreset = null
+        activePresetTrack = null
         mediaController.clearMediaItems()
         queueTracks.clear()
         _uiState.update {
@@ -337,6 +370,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 positionMs = 0L,
                 durationMs = 0L,
                 isCountInActive = false,
+                presetName = null,
+                presetSummary = null,
             )
         }
     }
@@ -375,18 +410,34 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun seekTo(positionMs: Long) {
         if (!::mediaController.isInitialized) return
-        if (isCountInActive) {
+        val clamped = positionMs.coerceIn(0L, max(0L, mediaController.duration))
+        mediaController.seekTo(clamped)
+        _uiState.update { it.copy(positionMs = clamped) }
+
+        if (activePreset != null) {
+            // Re-sync the metronome to the new position so count-ins stay on beat.
+            seekBaseMs = clamped
             cancelMetronome()
-            isCountInActive = false
-            _uiState.update { it.copy(isCountInActive = false) }
+            countInJob = viewModelScope.launch {
+                awaitReady()
+                startCountInScheduling()
+            }
+        } else {
+            cancelMetronome()
         }
-        mediaController.seekTo(positionMs)
-        _uiState.update { it.copy(positionMs = positionMs) }
     }
 
     fun skipToPrevious() {
         if (!::mediaController.isInitialized) return
-        mediaController.seekToPrevious()
+        val preset = activePreset
+        val track = activePresetTrack
+        if (preset != null && track != null) {
+            // Pause the song, then replay the whole preset sequence (count-in first, then track).
+            mediaController.pause()
+            playWithLayers(track, preset)
+        } else {
+            mediaController.seekToPrevious()
+        }
     }
 
     fun skipToNext() {
@@ -430,6 +481,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     .build(),
             )
             .build()
+    }
+
+    private fun presetSummary(preset: com.showtimeplayer.data.db.entity.PresetEntity): String {
+        val speed = "${(preset.playbackRate * 100).roundToInt()}%"
+        val pitch = preset.pitchOffsetSemitones
+        val pitchText = when {
+            pitch > 0 -> " • +$pitch st"
+            pitch < 0 -> " • $pitch st"
+            else -> ""
+        }
+        val tape = if (preset.pitchFollowsSpeed) " • tape" else ""
+        return "$speed$pitchText$tape"
     }
 
     private fun startProgressUpdates() {

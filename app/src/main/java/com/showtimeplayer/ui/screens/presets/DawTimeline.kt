@@ -543,7 +543,7 @@ private fun DrawScope.drawRegion(
     msPerPixel: Float,
     canvasWidth: Float,
     textMeasurer: TextMeasurer,
-    alpha: Float = 0.7f,
+    alpha: Float = 1.0f,
     outline: Boolean = false,
 ) {
     if (trackDurationMs <= 0) return

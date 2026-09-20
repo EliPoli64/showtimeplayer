@@ -100,7 +100,7 @@ class MetronomeEngine {
             val accent = k % timeSigNum == 0
             val freq = if (accent) 1000.0 else 800.0
             val amp = (if (accent) 0.8 else 0.4) * volume
-            val durationMs = if (accent) 15 else 10
+            val durationMs = if (accent) 20 else 14
             val clickSamples = (durationMs * sampleRate / 1000.0).toInt()
             val start = k * spacing
             for (i in 0 until clickSamples) {

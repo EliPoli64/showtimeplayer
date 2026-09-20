@@ -256,7 +256,7 @@ private:
         s.phase = 0.0;
         s.phaseIncrement = (2.0 * M_PI * frequency) / sampleRate;
 
-        int durationMs = isAccent ? 15 : 10;
+        int durationMs = isAccent ? 20 : 14;
         s.clickTotalSamples = sampleRate * durationMs / 1000;
         s.clickSamplesRemaining = s.clickTotalSamples;
 
