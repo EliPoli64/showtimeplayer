@@ -14,6 +14,7 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the longer design spec.
 **Library**
 - Scans on-device audio via `MediaStore` (background, coroutine-based).
 - Restrict scanning to chosen folders (stored with DataStore).
+- Re-scan refreshes tracks in place (same row ids), so per-track presets survive a rescan.
 - Play a track or add it to the queue.
 
 **Albums**
@@ -22,7 +23,10 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the longer design spec.
 **Player**
 - Album art (Coil), title/artist, seekable progress bar, prev/play-pause/next.
 - Queue bottom sheet: reorder, remove, clear, jump to item.
-- Count-in countdown display while a preset's count-in is running.
+- Active-preset banner (name + summary) shown on the now-playing screen.
+- "Count-in running" indicator while a preset's count-in is in progress; the song audio
+  starts after any leading count-in region, and seeking re-syncs the metronome to the
+  new playback position.
 
 **Presets, DAW-style metronome editor**
 - Up to **4 metronome layers** per preset.
@@ -123,6 +127,7 @@ app/src/main/
     ├── CMakeLists.txt
     ├── AudioEngineNative.cpp    # Oboe stream + JNI entry points
     ├── MetronomeSynthesizer.h   # multi-stream click renderer (mutex-guarded)
+    ├── MetronomeSynthesizer.cpp # live streams + pre-rendered count-in clips
     └── PitchSpeedProcessor.*    # SoundTouch time-stretch/pitch (stub)
 ```
 
@@ -130,8 +135,7 @@ app/src/main/
 
 ## Data model
 
-Room database `practice.db` (`PracticeDatabase`, `exportSchema = false`,
-`fallbackToDestructiveMigration()`):
+Room database `practice.db` (`PracticeDatabase`, `exportSchema = false`):
 
 - **`tracks`**, indexed local audio: `uri`, title/artist/album, duration, album art, etc.
 - **`presets`**, per-song practice config: name, `playbackRate`,
@@ -142,19 +146,22 @@ Room database `practice.db` (`PracticeDatabase`, `exportSchema = false`,
 - **`metronome_regions`**, count-in blocks (`layerId` FK): `startMs`, bpm, time
   signature, count-in bars, volume.
 
-Foreign keys cascade on delete. Note that schema changes currently **wipe and recreate** the
-database (destructive migration is enabled).
+Foreign keys cascade on delete. Schema upgrades since v2 are real `Migration`s (2→3 … 5→6)
+that preserve data; `fallbackToDestructiveMigration()` is only a last-resort fallback for
+unknown version gaps.
 
 ---
 
 ## Native audio engine
 
 The metronome does not use per-click `AudioTrack`s. `AudioEngineNative.cpp` opens a
-low-latency Oboe output stream (44.1 kHz, stereo float) and
-`MetronomeSynthesizer` mixes any number of concurrent click streams sample-accurately
-(sine bursts with an exponential decay envelope, accented downbeats, per-stream volume).
-Streams can be added/updated/removed while the audio callback runs; access is guarded by a
-mutex. Kotlin talks to it through `NativeOboeEngine` -> `MetronomeEngine`.
+low-latency Oboe output stream (44.1 kHz, stereo float). `MetronomeSynthesizer` mixes
+count-ins as **pre-rendered PCM clips** (`RenderedClip`) positioned sample-accurately by
+the engine's audio sample counter, with live oscillator streams kept as a fallback. The
+mix passes through a soft-clip limiter so per-click volume up to 200% gets louder without
+hard clipping. Streams/clips can be added/updated/removed while the audio callback runs;
+access is guarded by a mutex. Kotlin talks to it through `NativeOboeEngine` ->
+`MetronomeEngine`.
 
 Song playback uses ExoPlayer. Pitch shifting and speed use ExoPlayer's built-in
 time-stretch/pitch (Sonic); `PitchSpeedProcessor.cpp` is a placeholder for an optional
@@ -164,7 +171,8 @@ higher-fidelity SoundTouch DSP path.
 
 ## Notes / limitations
 
-- `fallbackToDestructiveMigration()` is enabled, evolving the schema clears existing data.
+- Known upgrades (v2→v6) run as data-preserving migrations; only unknown version gaps
+  fall back to a destructive rebuild.
 - The native SoundTouch time-stretch/pitch processor is **not** implemented; pitch/speed are
   handled by ExoPlayer.
 - No unit or instrumentation test suite is checked in yet.
