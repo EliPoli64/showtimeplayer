@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -58,7 +59,6 @@ import kotlinx.coroutines.launch
 @Composable
 fun AlbumsScreen(
     viewModel: AlbumsViewModel,
-    onTrackClick: (TrackEntity) -> Unit,
     onTrackAddToQueue: (TrackEntity) -> Unit,
     onPlayAlbum: (List<TrackEntity>, Int) -> Unit,
     onAddAlbumToQueue: (List<TrackEntity>) -> Unit,
@@ -71,9 +71,8 @@ fun AlbumsScreen(
         AlbumDetailScreen(
             album = uiState.selectedAlbum!!,
             onBack = viewModel::clearSelection,
-            onTrackClick = onTrackClick,
             onTrackAddToQueue = onTrackAddToQueue,
-            onPlayAlbum = { onPlayAlbum(uiState.selectedAlbum!!.tracks, 0) },
+            onPlayAlbum = { startIndex -> onPlayAlbum(uiState.selectedAlbum!!.tracks, startIndex) },
             onAddAlbumToQueue = { onAddAlbumToQueue(uiState.selectedAlbum!!.tracks) },
             snackbarHostState = snackbarHostState,
         )
@@ -153,9 +152,8 @@ private fun AlbumListScreen(
 private fun AlbumDetailScreen(
     album: Album,
     onBack: () -> Unit,
-    onTrackClick: (TrackEntity) -> Unit,
     onTrackAddToQueue: (TrackEntity) -> Unit,
-    onPlayAlbum: () -> Unit,
+    onPlayAlbum: (startIndex: Int) -> Unit,
     onAddAlbumToQueue: () -> Unit,
     snackbarHostState: SnackbarHostState,
 ) {
@@ -252,7 +250,7 @@ private fun AlbumDetailScreen(
                     ) {
                         Button(
                             onClick = {
-                                onPlayAlbum()
+                                onPlayAlbum(0)
                                 scope.launch {
                                     snackbarHostState.showSnackbar("Playing album")
                                 }
@@ -288,7 +286,7 @@ private fun AlbumDetailScreen(
             }
 
             // Track list
-            items(items = album.tracks, key = { it.id }) { track ->
+            itemsIndexed(items = album.tracks, key = { _, track -> track.id }) { index, track ->
                 ListItem(
                     headlineContent = { Text(track.title ?: "Unknown title") },
                     supportingContent = {
@@ -314,7 +312,7 @@ private fun AlbumDetailScreen(
                         }
                     },
                     modifier = Modifier.combinedClickable(
-                        onClick = { onTrackClick(track) },
+                        onClick = { onPlayAlbum(index) },
                         onLongClick = {
                             onTrackAddToQueue(track)
                             scope.launch {

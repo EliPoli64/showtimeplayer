@@ -168,10 +168,6 @@ fun ShowtimeNavigation(
             composable(Screen.Albums.route) {
                 AlbumsScreen(
                     viewModel = albumsViewModel,
-                    onTrackClick = { track ->
-                        playerViewModel.playTrack(track)
-                        navigateToPlayer()
-                    },
                     onTrackAddToQueue = { track ->
                         playerViewModel.addToQueue(track)
                     },

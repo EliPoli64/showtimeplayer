@@ -12,8 +12,10 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
+import com.showtimeplayer.app.PracticeApplication
 import com.showtimeplayer.data.db.entity.MetronomeRegion
 import com.showtimeplayer.data.db.entity.TrackEntity
+import com.showtimeplayer.data.preferences.SavedPlaybackState
 import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetWithLayers
 import com.showtimeplayer.player.service.PlaybackService
@@ -25,9 +27,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -54,8 +58,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
-    private val metronomeEngine =
-        (application as com.showtimeplayer.app.PracticeApplication).metronomeEngine
+    private val app = application as PracticeApplication
+
+    private val metronomeEngine = app.metronomeEngine
+    private val trackRepository = app.trackRepository
+    private val playbackStatePreferences = app.playbackStatePreferences
+    private val applicationScope = app.applicationScope
 
     private val queueTracks = mutableListOf<TrackEntity>()
     private val metronomeJobs = mutableListOf<Job>()
@@ -73,6 +81,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     // Media position at which the current count-in sequence began, so seeking re-syncs
     // the metronome ("load on beat") instead of losing it.
     private var seekBaseMs = 0L
+    // Restoring is a cold-start concern only; it must never run over an active session.
+    private var hasRestoredPlayback = false
+    private val isSaveInFlight = AtomicBoolean(false)
+
+    @Volatile
+    private var isSavePending = false
+    private var progressTicks = 0
 
     init {
         val sessionToken = SessionToken(
@@ -91,6 +106,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             mediaController.addListener(listener!!)
             startProgressUpdates()
             metronomeEngine.initialize()
+            restoreSavedPlayback()
         }
     }
 
@@ -298,26 +314,120 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         activePlaybackRate = 1.0f
         mediaController.setPlaybackParameters(PlaybackParameters(1.0f, 1.0f))
 
-        val mediaItems = tracks.map { trackToMediaItem(it) }
+        applyQueue(tracks, startIndex, 0L)
+
+        mediaController.prepare()
+        mediaController.play()
+    }
+
+    /**
+     * Replaces the queue with [tracks] and points the controller at [startIndex] / [positionMs].
+     * Leaves playback state alone — callers decide whether to prepare, play, or pause.
+     */
+    private fun applyQueue(tracks: List<TrackEntity>, startIndex: Int, positionMs: Long) {
+        val safeIndex = startIndex.coerceIn(0, tracks.lastIndex)
 
         queueTracks.clear()
         queueTracks.addAll(tracks)
 
         _uiState.update {
             it.copy(
-                currentTrack = tracks[startIndex],
+                currentTrack = tracks[safeIndex],
                 error = null,
                 queue = tracks.toList(),
-                currentQueueIndex = startIndex,
+                currentQueueIndex = safeIndex,
+                positionMs = positionMs,
                 isCountInActive = false,
                 presetName = null,
                 presetSummary = null,
             )
         }
 
-        mediaController.setMediaItems(mediaItems, startIndex, 0L)
+        mediaController.setMediaItems(tracks.map { trackToMediaItem(it) }, safeIndex, positionMs)
+    }
+
+    /**
+     * Rebuilds the previous session from disk on a cold start, left paused at the saved
+     * position so nothing starts playing on its own. Preset sessions are restored as plain
+     * playback — a preset's tempo/pitch/count-in is intentionally not reapplied.
+     */
+    private suspend fun restoreSavedPlayback() {
+        if (hasRestoredPlayback) return
+        hasRestoredPlayback = true
+
+        if (!::mediaController.isInitialized) return
+        // Never clobber a session that is already live (e.g. the service outlived the UI).
+        if (mediaController.mediaItemCount != 0 || _uiState.value.currentTrack != null) return
+
+        val saved = playbackStatePreferences.state.first() ?: return
+        if (saved.trackIds.isEmpty()) return
+
+        val tracks = trackRepository.getTracksByIds(saved.trackIds)
+        if (tracks.isEmpty()) {
+            // Every saved track is gone; don't leave a record we can never restore again.
+            playbackStatePreferences.clear()
+            return
+        }
+
+        // Re-anchor on the track that was actually current, in case the queue shrank.
+        val startIndex = tracks.indexOfFirst { it.id == saved.currentTrackId }
+            .takeIf { it >= 0 }
+            ?: saved.currentIndex.coerceIn(0, tracks.lastIndex)
+
+        applyQueue(tracks, startIndex, saved.positionMs)
         mediaController.prepare()
-        mediaController.play()
+        mediaController.pause()
+    }
+
+    /**
+     * Snapshots the current queue, track and position to disk. Writes are fire-and-forget on the
+     * application scope so they survive `onCleared`. DataStore serialises writes internally, but
+     * this keeps at most one of ours in flight; a call arriving mid-write is re-run afterwards so
+     * the newest state is never dropped.
+     */
+    private fun persistPlaybackState() {
+        if (!::mediaController.isInitialized) return
+
+        if (!isSaveInFlight.compareAndSet(false, true)) {
+            isSavePending = true
+            return
+        }
+
+        // Snapshot synchronously; the controller may be released before the write lands.
+        val trackIds = queueTracks.map { it.id }
+        val currentIndex =
+            if (trackIds.isEmpty()) -1 else mediaController.currentMediaItemIndex.coerceIn(0, trackIds.lastIndex)
+        val currentTrackId = trackIds.getOrNull(currentIndex)
+        val positionMs = max(0L, mediaController.currentPosition)
+
+        applicationScope.launch {
+            try {
+                if (currentTrackId == null) {
+                    // Queue emptied (or cleared): nothing left to remember.
+                    playbackStatePreferences.clear()
+                } else {
+                    playbackStatePreferences.save(
+                        SavedPlaybackState(
+                            trackIds = trackIds,
+                            currentIndex = currentIndex,
+                            currentTrackId = currentTrackId,
+                            positionMs = positionMs,
+                        )
+                    )
+                }
+            } finally {
+                isSaveInFlight.set(false)
+                if (isSavePending) {
+                    isSavePending = false
+                    persistPlaybackState()
+                }
+            }
+        }
+    }
+
+    /** Called when the UI goes to the background, the last reliable chance to record state. */
+    fun onAppBackgrounded() {
+        persistPlaybackState()
     }
 
     fun addToQueue(track: TrackEntity) {
@@ -517,6 +627,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             isBuffering = false,
                         )
                     }
+                    // onCleared() is not reliable when the process is killed, so checkpoint
+                    // the position periodically while playing.
+                    progressTicks++
+                    if (progressTicks >= TICKS_PER_CHECKPOINT) {
+                        progressTicks = 0
+                        persistPlaybackState()
+                    }
                 }
                 delay(200)
             }
@@ -526,6 +643,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private inner class PlayerListener : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _uiState.update { it.copy(isPlaying = isPlaying) }
+            // Covers both pausing and the track ending. Buffering also reports false, so only
+            // record a position the player actually settled on.
+            if (!isPlaying && mediaController.playbackState == Player.STATE_READY) {
+                persistPlaybackState()
+            }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -556,6 +678,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             syncQueueFromController()
+            persistPlaybackState()
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -567,9 +690,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         cancelMetronome()
+        // Must snapshot the position before the controller goes away.
+        persistPlaybackState()
         listener?.let { mediaController.removeListener(it) }
         mediaController.release()
         super.onCleared()
+    }
+
+    private companion object {
+        // 200ms progress tick x 25 ~= a checkpoint every 5 seconds while playing.
+        const val TICKS_PER_CHECKPOINT = 25
     }
 
     class Factory(private val application: Application) : ViewModelProvider.Factory {

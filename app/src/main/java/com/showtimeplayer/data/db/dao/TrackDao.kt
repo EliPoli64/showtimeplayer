@@ -20,6 +20,10 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE id = :id")
     suspend fun getById(id: Long): TrackEntity?
 
+    // Row order is unspecified for an IN query; callers must re-order by the id list.
+    @Query("SELECT * FROM tracks WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE uri = :uri")
     suspend fun getByUri(uri: String): TrackEntity?
 
