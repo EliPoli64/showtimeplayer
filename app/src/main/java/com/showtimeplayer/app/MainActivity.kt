@@ -35,6 +35,11 @@ class MainActivity : ComponentActivity() {
         PresetsViewModel.Factory(app, app.presetRepository, app.trackRepository)
     }
 
+    override fun onStop() {
+        super.onStop()
+        playerViewModel.onAppBackgrounded()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {

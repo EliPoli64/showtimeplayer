@@ -17,6 +17,16 @@ class TrackRepositoryImpl(
     suspend fun getTrack(id: Long): TrackEntity? = trackDao.getById(id)
 
     /**
+     * Resolves track ids back to entities in the exact order given, silently dropping ids that
+     * no longer exist. Used to rebuild a saved queue, which may reference deleted tracks.
+     */
+    suspend fun getTracksByIds(ids: List<Long>): List<TrackEntity> {
+        if (ids.isEmpty()) return emptyList()
+        val byId = trackDao.getByIds(ids).associateBy { it.id }
+        return ids.mapNotNull { byId[it] }
+    }
+
+    /**
      * Re-scans MediaStore using the selected folders and refreshes the cached track table
      * WITHOUT deleting existing rows. Existing tracks are updated in place (same id, so the
      * presets referencing them stay intact); new tracks are inserted. This prevents a library
