@@ -3,6 +3,7 @@ package com.showtimeplayer.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.showtimeplayer.ui.navigation.ShowtimeNavigation
 import com.showtimeplayer.ui.screens.albums.AlbumsViewModel
@@ -41,6 +42,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
+        window.isNavigationBarContrastEnforced = false
         super.onCreate(savedInstanceState)
         setContent {
             ShowtimePlayerTheme {

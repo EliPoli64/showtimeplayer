@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.showtimeplayer"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.showtimeplayer"
@@ -45,6 +46,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
     buildFeatures {
         compose = true
         prefab = true
