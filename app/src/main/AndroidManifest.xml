@@ -16,7 +16,7 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.ShowtimePlayer"
-        android:icon="@drawable/appIcon">
+        android:icon="@drawable/appicon">
         <activity
             android:name=".app.MainActivity"
             android:exported="true">
