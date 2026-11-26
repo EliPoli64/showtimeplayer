@@ -1,0 +1,125 @@
+name: Beta build
+
+on:
+  push:
+    branches-ignore:
+      - master
+
+concurrency:
+  group: beta-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  qa:
+    name: QA gate
+    uses: ./.github/workflows/qa.yml
+
+  beta:
+    name: Build and publish beta APK
+    needs: qa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Install Android NDK and CMake
+        run: |
+          set -euo pipefail
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1" \
+            --channel=0
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::Missing KEYSTORE_BASE64 secret. Beta builds must be signed."
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/showtimeplayer-release.keystore"
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/showtimeplayer-release.keystore" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Compute version
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION_NAME="1.0-beta.${GITHUB_RUN_NUMBER}+${SHORT_SHA}"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          SAFE_BRANCH="$(echo "$BRANCH" | tr '/._' '-')"
+          echo "ARTIFACT_NAME=showtimeplayer-beta-${SAFE_BRANCH}-build${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+          echo "APK_NAME=ShowtimePlayer-${VERSION_NAME}-${SAFE_BRANCH}.apk" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          VERSION_CODE: ${{ env.VERSION_CODE }}
+          VERSION_NAME: ${{ env.VERSION_NAME }}
+          KEYSTORE_FILE: ${{ env.KEYSTORE_FILE }}
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease
+
+      - name: Rename APK
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/beta"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/beta/${{ env.APK_NAME }}"
+
+      - name: Upload beta artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/beta/${{ env.APK_NAME }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          APK_NAME: ${{ env.APK_NAME }}
+          VERSION_NAME: ${{ env.VERSION_NAME }}
+        run: |
+          set -euo pipefail
+          TAG="beta/${BRANCH}"
+          SAFE_TAG="beta-${BRANCH}"
+          TITLE="Beta (${BRANCH}) · ${VERSION_NAME}"
+          NOTES="Rolling beta build from branch \`${BRANCH}\`.\n\n- Commit: ${GITHUB_SHA}\n- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Move the rolling tag to the current commit.
+          git tag -f "$TAG"
+          git push -f origin "$TAG"
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TITLE" --notes "$NOTES" --prerelease
+            gh release upload "$TAG" "$RUNNER_TEMP/beta/$APK_NAME" --clobber
+          else
+            gh release create "$TAG" "$RUNNER_TEMP/beta/$APK_NAME" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --prerelease
+          fi

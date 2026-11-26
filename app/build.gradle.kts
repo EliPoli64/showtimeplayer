@@ -14,8 +14,8 @@ android {
         applicationId = "com.showtimeplayer"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME") ?: "1.0"
 
         ndk {
             // abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -29,9 +29,25 @@ android {
         }
     }
 
+    signingConfigs {
+        val keystoreFile = System.getenv("KEYSTORE_FILE")
+        val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
+        val keyAlias = System.getenv("KEY_ALIAS")
+        val keyPassword = System.getenv("KEY_PASSWORD")
+        if (keystoreFile != null && keystorePassword != null && keyAlias != null && keyPassword != null) {
+            create("release") {
+                storeFile = file(keystoreFile)
+                storePassword = keystorePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
