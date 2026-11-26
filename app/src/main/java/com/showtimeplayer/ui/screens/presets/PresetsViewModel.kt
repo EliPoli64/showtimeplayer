@@ -19,10 +19,13 @@ import com.showtimeplayer.data.repository.TrackRepositoryImpl
 import com.showtimeplayer.util.AudioDecoder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -126,6 +129,21 @@ class PresetsViewModel(
     private var playbackClockJob: Job? = null
     // Sub-millisecond accumulator so the clock doesn't drift when scaled by the rate.
     private var clockPositionMs = 0.0
+
+    private val songSettingsChangeSignal = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_LATEST,
+    )
+
+    init {
+        viewModelScope.launch {
+            songSettingsChangeSignal
+                .collectLatest {
+                    delay(100)
+                    applySongParameters()
+                }
+        }
+    }
 
     val songSettingsState: StateFlow<SongSettingsState> = combine(
         playbackRate, pitchOffsetSemitones, pitchFollowsSpeed,
@@ -678,7 +696,7 @@ class PresetsViewModel(
         val clamped = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
         if (playbackRate.value == clamped) return
         playbackRate.value = clamped
-        applySongParameters()
+        songSettingsChangeSignal.tryEmit(Unit)
         // Clips are pre-rendered with the rate baked in, so re-render them at the new speed.
         scheduleClipReRender()
         scheduleSongSettingsPersist()
@@ -688,14 +706,14 @@ class PresetsViewModel(
         val clamped = semitones.coerceIn(-MAX_PITCH_SEMITONES, MAX_PITCH_SEMITONES)
         if (pitchOffsetSemitones.value == clamped) return
         pitchOffsetSemitones.value = clamped
-        applySongParameters()
+        songSettingsChangeSignal.tryEmit(Unit)
         scheduleSongSettingsPersist()
     }
 
     fun setPitchFollowsSpeed(enabled: Boolean) {
         if (pitchFollowsSpeed.value == enabled) return
         pitchFollowsSpeed.value = enabled
-        applySongParameters()
+        songSettingsChangeSignal.tryEmit(Unit)
         scheduleSongSettingsPersist()
     }
 

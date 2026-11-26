@@ -26,14 +26,19 @@ import com.showtimeplayer.ui.screens.presets.MIN_PLAYBACK_RATE
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log2
 import kotlin.math.max
@@ -100,6 +105,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var isSavePending = false
     private var progressTicks = 0
 
+    private val tuningChangeSignal = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_LATEST,
+    )
+
     init {
         val sessionToken = SessionToken(
             application,
@@ -118,6 +128,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             startProgressUpdates()
             metronomeEngine.initialize()
             restoreSavedPlayback()
+        }
+
+        viewModelScope.launch {
+            tuningChangeSignal
+                .collectLatest {
+                    delay(100)
+                    applyTuning()
+                }
         }
     }
 
@@ -184,7 +202,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         countInJob = viewModelScope.launch {
-            awaitReady()
+            if (!awaitReady()) {
+                _uiState.update { it.copy(error = "Playback did not become ready") }
+                return@launch
+            }
             startCountInScheduling()
 
             // Start the song audio after any leading count-in, so the sequence plays
@@ -298,7 +319,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         metronomeEngine.stop()
     }
 
-    private suspend fun awaitReady(): Boolean {
+    private suspend fun awaitReady(timeoutMs: Long = 5000): Boolean {
         if (!::mediaController.isInitialized) return false
         if (mediaController.playbackState == Player.STATE_READY) return true
 
@@ -311,12 +332,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         mediaController.addListener(readyListener)
-        try {
-            deferred.await()
+        return try {
+            withTimeout(timeoutMs) {
+                deferred.await()
+            }
+            true
+        } catch (_: TimeoutCancellationException) {
+            false
         } finally {
             mediaController.removeListener(readyListener)
         }
-        return true
     }
 
     fun playTrackAsQueue(tracks: List<TrackEntity>, startIndex: Int) {
@@ -527,6 +552,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 metronomeEngine.stop()
             }
         } else {
+            // If playback errored or reached the end, play() alone is a no-op: we must
+            // re-prepare before the controller will resume.
+            when (mediaController.playbackState) {
+                Player.STATE_ENDED -> {
+                    mediaController.seekTo(0)
+                    mediaController.prepare()
+                }
+                Player.STATE_IDLE -> {
+                    mediaController.seekTo(max(0, mediaController.currentPosition))
+                    mediaController.prepare()
+                }
+            }
             mediaController.play()
             if (isCountInActive) {
                 isPaused = false
@@ -581,7 +618,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
         _uiState.update { it.copy(playbackRate = clampedRate, pitchSemitones = newPitch) }
         reanchorCountInClock(state.playbackRate, clampedRate)
-        applyTuning()
+        tuningChangeSignal.tryEmit(Unit)
     }
 
     private fun applyTuning() {
@@ -619,7 +656,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             seekBaseMs = clamped
             cancelMetronome()
             countInJob = viewModelScope.launch {
-                awaitReady()
+                if (!awaitReady()) {
+                    _uiState.update { it.copy(error = "Playback did not become ready") }
+                    return@launch
+                }
                 startCountInScheduling()
             }
         } else {
