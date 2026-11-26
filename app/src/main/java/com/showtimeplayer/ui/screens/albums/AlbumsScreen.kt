@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -94,6 +95,7 @@ private fun AlbumListScreen(
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Albums") }) },
+        contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
     ) { padding ->
         if (albums.isEmpty()) {
             Box(
@@ -175,6 +177,7 @@ private fun AlbumDetailScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),

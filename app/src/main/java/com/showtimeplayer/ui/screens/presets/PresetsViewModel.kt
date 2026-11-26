@@ -29,13 +29,13 @@ import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
-// Purple-family palette drawn from Material 3's tonal scheme (deep violet → light
-// violet → plum → slate) so layer rows and count-in blocks harmonize with the app theme.
+// Greyish-blue palette so layer rows and count-in blocks harmonize with the app's
+// dark-grey / greyish-blue theme.
 val LAYER_COLORS = listOf(
-    0xFF4F378B,
-    0xFF7F67BE,
-    0xFF8E4585,
-    0xFF625B71,
+    0xFF4E6A80,
+    0xFF5E7B93,
+    0xFF6E8CA3,
+    0xFF52697C,
 )
 
 const val MIN_PLAYBACK_RATE = 0.25f

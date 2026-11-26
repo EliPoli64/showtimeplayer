@@ -40,6 +40,9 @@ fun WaveformView(
     // The slider value represents the visible window's center position
     val sliderValue = startWithPadding + visibleDurationMs / 2
 
+    val barColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+    val thumbColor = MaterialTheme.colorScheme.error
+
     Box(modifier = modifier) {
         // Decorative bar background
         Canvas(
@@ -47,7 +50,6 @@ fun WaveformView(
                 .fillMaxWidth()
                 .height(60.dp),
         ) {
-            val barColor = Color.Gray.copy(alpha = 0.3f)
             val barCount = (size.width / 4).toInt()
             for (i in 0 until barCount) {
                 val x = i * 4f
@@ -68,7 +70,7 @@ fun WaveformView(
                 .fillMaxWidth()
                 .height(60.dp),
             colors = SliderDefaults.colors(
-                thumbColor = Color.Red,
+                thumbColor = thumbColor,
                 activeTrackColor = Color.Transparent,
                 inactiveTrackColor = Color.Transparent,
             ),

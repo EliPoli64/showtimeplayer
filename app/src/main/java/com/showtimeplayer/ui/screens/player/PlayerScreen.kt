@@ -12,15 +12,20 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,6 +37,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,7 +55,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import com.showtimeplayer.ui.screens.presets.MAX_PITCH_SEMITONES
+import com.showtimeplayer.ui.screens.presets.MAX_PLAYBACK_RATE
+import com.showtimeplayer.ui.screens.presets.MIN_PLAYBACK_RATE
 import com.showtimeplayer.util.formatDurationMs
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,9 +68,15 @@ fun PlayerScreen(viewModel: PlayerViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showQueueSheet by remember { mutableStateOf(false) }
+    var showTuningDialog by remember { mutableStateOf(false) }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Player") }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Player") },
+            )
+        },
+        contentWindowInsets = WindowInsets(0.dp, 0.dp, 0.dp, 0.dp),
     ) { padding ->
         Column(
             modifier = Modifier
@@ -250,6 +267,20 @@ fun PlayerScreen(viewModel: PlayerViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                // Tempo and pitch (speed)
+                IconButton(
+                    onClick = { showTuningDialog = true },
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Speed,
+                        contentDescription = "Tempo and pitch",
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
                 IconButton(
                     onClick = viewModel::skipToPrevious,
                     modifier = Modifier.size(48.dp),
@@ -338,5 +369,146 @@ fun PlayerScreen(viewModel: PlayerViewModel) {
                 viewModel.moveQueueItem(fromIndex, toIndex)
             },
         )
+    }
+
+    if (showTuningDialog) {
+        TempoPitchDialog(
+            state = uiState,
+            onRateChange = viewModel::setPlaybackRate,
+            onPitchChange = viewModel::setPitchSemitones,
+            onLinkChange = viewModel::setPitchLinked,
+            onReset = viewModel::resetTuning,
+            onDismiss = { showTuningDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun TempoPitchDialog(
+    state: PlayerUiState,
+    onRateChange: (Float) -> Unit,
+    onPitchChange: (Float) -> Unit,
+    onLinkChange: (Boolean) -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Tempo & Pitch",
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = { onLinkChange(!state.isPitchLinked) }) {
+                    Icon(
+                        imageVector = if (state.isPitchLinked) {
+                            Icons.Filled.Link
+                        } else {
+                            Icons.Filled.LinkOff
+                        },
+                        contentDescription = if (state.isPitchLinked) {
+                            "Unlink tempo and pitch"
+                        } else {
+                            "Link tempo and pitch"
+                        },
+                        tint = if (state.isPitchLinked) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                }
+            }
+        },
+        text = {
+            Column {
+                SliderLabel(
+                    label = "Speed",
+                    value = "${(state.playbackRate * 100).roundToInt()}%",
+                    range = "${(MIN_PLAYBACK_RATE * 100).roundToInt()}–${(MAX_PLAYBACK_RATE * 100).roundToInt()}%",
+                )
+                Slider(
+                    value = state.playbackRate,
+                    onValueChange = onRateChange,
+                    valueRange = MIN_PLAYBACK_RATE..MAX_PLAYBACK_RATE,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                    ),
+                )
+
+                SliderLabel(
+                    label = "Pitch",
+                    value = pitchLabel(state.pitchSemitones, state.isPitchLinked),
+                    range = "-$MAX_PITCH_SEMITONES–+$MAX_PITCH_SEMITONES st",
+                )
+                Slider(
+                    value = state.pitchSemitones,
+                    onValueChange = onPitchChange,
+                    valueRange = -MAX_PITCH_SEMITONES.toFloat()..MAX_PITCH_SEMITONES.toFloat(),
+                    steps = if (state.isPitchLinked) 0 else MAX_PITCH_SEMITONES * 2 - 1,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                    ),
+                )
+
+                Text(
+                    text = if (state.isPitchLinked) {
+                        "Linked — pitch rises and falls with tempo"
+                    } else {
+                        "Unlinked — pitch and tempo set separately"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onReset,
+                enabled = state.playbackRate != 1.0f || state.pitchSemitones != 0f,
+            ) {
+                Text("Reset")
+            }
+        },
+    )
+}
+
+@Composable
+private fun SliderLabel(label: String, value: String, range: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = "$label: $value",
+            style = MaterialTheme.typography.labelLarge,
+        )
+        Text(
+            text = range,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun pitchLabel(pitch: Float, linked: Boolean): String {
+    if (linked) {
+        return if (abs(pitch) < 0.05f) "0.0 st" else "%+.1f st".format(pitch)
+    }
+    val semitones = pitch.roundToInt()
+    return when {
+        semitones > 0 -> "+$semitones st"
+        semitones < 0 -> "$semitones st"
+        else -> "0 st"
     }
 }

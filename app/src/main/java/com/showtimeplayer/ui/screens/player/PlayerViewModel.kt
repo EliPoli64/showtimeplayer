@@ -20,6 +20,9 @@ import com.showtimeplayer.data.repository.MetronomeLayerWithRegions
 import com.showtimeplayer.data.repository.PresetWithLayers
 import com.showtimeplayer.player.service.PlaybackService
 import com.showtimeplayer.ui.screens.presets.MAX_CLICK_LEAD_MS
+import com.showtimeplayer.ui.screens.presets.MAX_PITCH_SEMITONES
+import com.showtimeplayer.ui.screens.presets.MAX_PLAYBACK_RATE
+import com.showtimeplayer.ui.screens.presets.MIN_PLAYBACK_RATE
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,6 +35,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.pow
 import kotlin.math.roundToInt
@@ -49,6 +53,11 @@ data class PlayerUiState(
     val beat1Ms: Long = 0L,
     val presetName: String? = null,
     val presetSummary: String? = null,
+    val playbackRate: Float = 1.0f,
+    // Effective pitch shift in semitones; while linked it is derived from playbackRate, so both
+    // sliders always describe the same audio result.
+    val pitchSemitones: Float = 0f,
+    val isPitchLinked: Boolean = false,
 )
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
@@ -75,6 +84,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var lastResumeNs: Long = 0L
     private var metronomeActiveStreams = mutableSetOf<Int>()
     private var activePlaybackRate: Float = 1.0f
+    // Pitch offset (semitones) the linked sliders keep: pitch = anchor + 12*log2(rate).
+    private var linkAnchorSemitones: Float = 0f
     private var activePresetTrack: TrackEntity? = null
     private var activePreset: PresetWithLayers? = null
     private var activeEnabledLayers: List<MetronomeLayerWithRegions> = emptyList()
@@ -132,21 +143,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         seekBaseMs = 0L
         activePresetTrack = track
         activePreset = presetWithLayers
-        activePlaybackRate = preset.playbackRate.coerceIn(0.25f, 2.0f)
-        val semitoneFactor = 2.0.pow(preset.pitchOffsetSemitones / 12.0).toFloat()
-        val pitch = if (preset.pitchFollowsSpeed) {
-            semitoneFactor * activePlaybackRate
-        } else {
-            semitoneFactor
-        }
-        mediaController.setPlaybackParameters(
-            PlaybackParameters(activePlaybackRate, pitch),
-        )
 
         // Stop any current playback and clear the queue so the preset plays on its own.
         mediaController.stop()
         queueTracks.clear()
         queueTracks.add(track)
+
+        val presetRate = preset.playbackRate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        val presetPitch = preset.pitchOffsetSemitones
+            .coerceIn(-MAX_PITCH_SEMITONES, MAX_PITCH_SEMITONES)
+            .toFloat()
+        linkAnchorSemitones = if (preset.pitchFollowsSpeed) presetPitch else 0f
+
         _uiState.update {
             it.copy(
                 currentTrack = track,
@@ -156,8 +164,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 isCountInActive = false,
                 presetName = preset.name,
                 presetSummary = presetSummary(preset),
+                playbackRate = presetRate,
+                pitchSemitones = if (preset.pitchFollowsSpeed) {
+                    presetPitch + semitonesForRate(presetRate)
+                } else {
+                    presetPitch
+                },
+                isPitchLinked = preset.pitchFollowsSpeed,
             )
         }
+        applyTuning()
+
         mediaController.setMediaItems(listOf(trackToMediaItem(track)), 0, 0L)
         mediaController.prepare()
 
@@ -311,8 +328,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         isCountInActive = false
         isPaused = false
         pauseAccumulatedNs = 0L
-        activePlaybackRate = 1.0f
-        mediaController.setPlaybackParameters(PlaybackParameters(1.0f, 1.0f))
+        resetTuning()
 
         applyQueue(tracks, startIndex, 0L)
 
@@ -375,6 +391,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             ?: saved.currentIndex.coerceIn(0, tracks.lastIndex)
 
         applyQueue(tracks, startIndex, saved.positionMs)
+        resetTuning()
         mediaController.prepare()
         mediaController.pause()
     }
@@ -471,6 +488,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         activePresetTrack = null
         mediaController.clearMediaItems()
         queueTracks.clear()
+        resetTuning()
         _uiState.update {
             it.copy(
                 currentTrack = null,
@@ -517,6 +535,78 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
+
+    // -- Tempo / pitch --
+
+    fun setPlaybackRate(rate: Float) {
+        commitTuning(rate, _uiState.value.pitchSemitones)
+    }
+
+    fun setPitchSemitones(semitones: Float) {
+        val state = _uiState.value
+        if (state.isPitchLinked) {
+            commitTuning(rateForSemitones(semitones - linkAnchorSemitones), semitones)
+        } else {
+            commitTuning(state.playbackRate, semitones)
+        }
+    }
+
+    fun setPitchLinked(linked: Boolean) {
+        val state = _uiState.value
+        if (state.isPitchLinked == linked) return
+        if (linked) {
+            // Anchor on the pitch that is already audible, so linking never changes the sound.
+            linkAnchorSemitones = state.pitchSemitones - semitonesForRate(state.playbackRate)
+        }
+        _uiState.update { it.copy(isPitchLinked = linked) }
+    }
+
+    fun resetTuning() {
+        linkAnchorSemitones = 0f
+        val previousRate = _uiState.value.playbackRate
+        _uiState.update { it.copy(playbackRate = 1.0f, pitchSemitones = 0f) }
+        reanchorCountInClock(previousRate, 1.0f)
+        applyTuning()
+    }
+
+    private fun commitTuning(rate: Float, pitch: Float) {
+        val state = _uiState.value
+        val clampedRate = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        val newPitch = if (state.isPitchLinked) {
+            linkAnchorSemitones + semitonesForRate(clampedRate)
+        } else {
+            pitch.coerceIn(-MAX_PITCH_SEMITONES.toFloat(), MAX_PITCH_SEMITONES.toFloat())
+        }
+        if (state.playbackRate == clampedRate && state.pitchSemitones == newPitch) return
+
+        _uiState.update { it.copy(playbackRate = clampedRate, pitchSemitones = newPitch) }
+        reanchorCountInClock(state.playbackRate, clampedRate)
+        applyTuning()
+    }
+
+    private fun applyTuning() {
+        if (!::mediaController.isInitialized) return
+        val state = _uiState.value
+        activePlaybackRate = state.playbackRate
+        mediaController.setPlaybackParameters(
+            PlaybackParameters(state.playbackRate, rateForSemitones(state.pitchSemitones)),
+        )
+    }
+
+    // The count-in clock scales wall time by the rate, so a rate change would jump every pending
+    // delay (count-in clicks, song start). Shift the clock to keep elapsed media time continuous.
+    private fun reanchorCountInClock(previousRate: Float, newRate: Float) {
+        if (previousRate == newRate || !isCountInActive || songStartTimeNs <= 0L) return
+        val now = System.nanoTime()
+        val wallElapsedNs = now - songStartTimeNs - pauseAccumulatedNs
+        if (wallElapsedNs <= 0L) return
+        val correctedNs = (wallElapsedNs.toDouble() * previousRate / newRate).toLong().coerceAtLeast(0L)
+        songStartTimeNs = now - pauseAccumulatedNs - correctedNs
+    }
+
+    private fun semitonesForRate(rate: Float): Float = (12.0 * log2(rate.toDouble())).toFloat()
+
+    private fun rateForSemitones(semitones: Float): Float = 2.0.pow(semitones / 12.0).toFloat()
 
     fun seekTo(positionMs: Long) {
         if (!::mediaController.isInitialized) return
