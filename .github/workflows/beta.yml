@@ -17,6 +17,7 @@ jobs:
   beta:
     name: Build and publish beta APK
     needs: qa
+    environment: build
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -17,6 +17,7 @@ jobs:
   release:
     name: Build and publish release
     needs: qa
+    environment: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
